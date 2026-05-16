@@ -10,4 +10,4 @@ export GH_PAT="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"
 export GH_USERNAME="EngKHALIDx"
 export ALLOWED_USERNAMES="o_okh1"
 export DEFAULT_MODEL="glm-4-flash"
-exec npx tsx src/index.ts
+exec ./node_modules/.bin/tsx src/index.ts

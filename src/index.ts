@@ -521,7 +521,10 @@ async function main() {
 
 process.on('SIGINT', () => { console.log('\n[Bot] Shutting down...'); process.exit(0); });
 process.on('SIGTERM', () => { console.log('\n[Bot] SIGTERM received'); process.exit(0); });
-process.on('uncaughtException', (e) => console.error('[Uncaught]:', e));
-process.on('unhandledRejection', (r) => console.error('[Unhandled]:', r));
+process.on('uncaughtException', (e) => { console.error('[Uncaught]:', e); });
+process.on('unhandledRejection', (r) => { console.error('[Unhandled]:', r); });
+
+// Keep process alive - prevent silent exit
+setInterval(() => {}, 30000);
 
 main();
