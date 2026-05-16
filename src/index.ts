@@ -508,8 +508,8 @@ async function main() {
   await deleteWebhook();
   console.log('[Bot] Webhook deleted, starting polling...');
 
-  // Poll loop
-  const loop = () => poll().finally(() => setTimeout(loop, 1000));
+  // Poll loop - use short polling to avoid conflicts with other Telegram clients
+  const loop = () => poll().finally(() => setTimeout(loop, 2000));
   loop();
 
   // Heartbeat
