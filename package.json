@@ -1,0 +1,20 @@
+{
+  "name": "zai-telegram-agent",
+  "version": "15.0.0",
+  "description": "Z.ai Telegram Agent - Real-time agent mode like chat.z.ai",
+  "main": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx --watch src/index.ts"
+  },
+  "dependencies": {
+    "z-ai-web-dev-sdk": "^0.0.17",
+    "form-data": "^4.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  }
+}

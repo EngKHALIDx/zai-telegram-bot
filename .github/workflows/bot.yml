@@ -1,0 +1,50 @@
+name: Z.ai Agent 24/7
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *'  # Every 5 hours
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330  # 5.5 hours max
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Restore workspace
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-workspace
+          continue-on-error: true
+
+      - name: Run Agent
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ZAI_BASE_URL: ${{ secrets.ZAI_BASE_URL }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          ZAI_CHAT_ID: ${{ secrets.ZAI_CHAT_ID }}
+          ZAI_TOKEN: ${{ secrets.ZAI_TOKEN }}
+          ZAI_USER_ID: ${{ secrets.ZAI_USER_ID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+          ALLOWED_USERNAMES: ${{ secrets.ALLOWED_USERNAMES }}
+          DEFAULT_MODEL: glm-5.1
+        run: npx tsx src/index.ts
+
+      - name: Save workspace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-workspace
+          path: |
+            workspace/
+            data/
+          retention-days: 90
