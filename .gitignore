@@ -1,6 +1,8 @@
 node_modules/
 dist/
-data/
 workspace/
+data/
 .z-ai-config
-*.env
+bot-*.log
+*.log
+.env

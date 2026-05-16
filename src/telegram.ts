@@ -1,5 +1,6 @@
 /**
- * Telegram API Helper v16.0 - Full featured with retry, rate limiting, and media support
+ * Telegram API Helper v17.0
+ * Rate-limited, retry-capable, with media support
  */
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
@@ -7,7 +8,7 @@ const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 interface InlineKeyboardButton { text: string; callback_data?: string; url?: string; }
 
 let lastApiCall = 0;
-const MIN_INTERVAL = 35; // ms between API calls to avoid 429
+const MIN_INTERVAL = 35;
 
 async function rateLimited(): Promise<void> {
   const now = Date.now();

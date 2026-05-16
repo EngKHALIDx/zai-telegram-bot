@@ -1,7 +1,6 @@
 /**
- * Real-time Operations Display System v16.0
+ * Real-time Operations Display System v17.0
  * Shows what the agent is doing in real-time like chat.z.ai
- * Features: Live status, step counter, timer, stop button, throttled updates
  */
 import { sendMessage, editMessageText, escapeHtml, truncateText } from './telegram.js';
 
@@ -27,12 +26,8 @@ export interface ActiveOperation {
   displayTimer: NodeJS.Timeout | null;
 }
 
-// Track active operations per chat
 const activeOps: Map<number, ActiveOperation> = new Map();
 
-/**
- * Start a new operation session
- */
 export function startOperation(chatId: number, userMessage: string): ActiveOperation {
   stopOperation(chatId);
 
@@ -51,7 +46,6 @@ export function startOperation(chatId: number, userMessage: string): ActiveOpera
 
   activeOps.set(chatId, op);
 
-  // Start periodic display updates while running
   op.displayTimer = setInterval(() => {
     if (op.status === 'running') {
       updateDisplay(chatId).catch(() => {});
@@ -114,7 +108,7 @@ export function updateStep(chatId: number, stepIndex: number, status: OperationS
   }
 }
 
-// ─── Display Formatting ───────────────────────────────────
+// ─── Display ────────────────────────────────────────────────
 
 function formatOperation(op: ActiveOperation): string {
   const elapsed = Math.floor((Date.now() - op.startedAt) / 1000);
@@ -163,44 +157,23 @@ function getToolIcon(tool: string): string {
   return icons[tool] || '🔧';
 }
 
-function getStopButton() {
-  return {
-    inline_keyboard: [[{ text: '⏹️ إيقاف', callback_data: 'stop_op' }]],
-  };
-}
-
-function getDoneButton() {
-  return {
-    inline_keyboard: [
-      [
-        { text: '🔄 مهمة جديدة', callback_data: 'new_agent' },
-        { text: '📊 عرض النتائج', callback_data: 'show_results' },
-      ],
-    ],
-  };
-}
-
-/**
- * Send or update the operation status message
- * Throttled to avoid Telegram API limits
- */
 export async function updateDisplay(chatId: number): Promise<void> {
   const op = activeOps.get(chatId);
   if (!op) return;
 
-  // Throttle: min 1.5s between updates
   const now = Date.now();
   if (now - op.lastUpdateTime < 1500) return;
   op.lastUpdateTime = now;
 
   const text = formatOperation(op);
-  const replyMarkup = op.status === 'running' ? getStopButton() : getDoneButton();
+  const replyMarkup = op.status === 'running'
+    ? { inline_keyboard: [[{ text: '⏹️ إيقاف', callback_data: 'stop_op' }]] }
+    : { inline_keyboard: [[{ text: '🔄 مهمة جديدة', callback_data: 'new_agent' }, { text: '📊 النتائج', callback_data: 'show_results' }]] };
 
   try {
     if (op.statusMessageId) {
       const result = await editMessageText(chatId, op.statusMessageId, text, { reply_markup: replyMarkup });
       if (!result?.ok) {
-        // Message might be deleted or unchanged, try sending new
         if (result?.description?.includes('message is not modified')) return;
         op.statusMessageId = null;
       }
@@ -217,36 +190,26 @@ export async function updateDisplay(chatId: number): Promise<void> {
   }
 }
 
-/**
- * Final display update when operation completes
- */
 export async function finishDisplay(chatId: number, finalOutput: string): Promise<void> {
   const op = activeOps.get(chatId);
   if (!op) return;
 
   op.status = 'done';
   if (op.displayTimer) { clearInterval(op.displayTimer); op.displayTimer = null; }
-  op.lastUpdateTime = 0; // Force update
+  op.lastUpdateTime = 0;
   await updateDisplay(chatId);
 
-  // Send final output as separate message
   if (finalOutput) {
     await sendMessage(chatId, `🤖 <b>النتيجة:</b>\n\n${truncateText(escapeHtml(finalOutput))}`, {
       reply_markup: {
         inline_keyboard: [
-          [
-            { text: '🔄 مهمة جديدة', callback_data: 'new_agent' },
-            { text: '🌟 النموذج', callback_data: 'models' },
-          ],
+          [{ text: '🔄 مهمة جديدة', callback_data: 'new_agent' }, { text: '🌟 النموذج', callback_data: 'models' }],
         ],
       },
     });
   }
 }
 
-/**
- * Clean up old operations
- */
 export function cleanup(chatId: number): void {
   const op = activeOps.get(chatId);
   if (op && op.status !== 'running') {
@@ -256,7 +219,7 @@ export function cleanup(chatId: number): void {
       if (current && current.status !== 'running') {
         activeOps.delete(chatId);
       }
-    }, 300000); // Remove after 5 minutes
+    }, 300000);
   }
 }
 

@@ -1,7 +1,7 @@
 /**
- * Z.ai Telegram Agent v16.0
- * Full Agent mode like chat.z.ai
- * Features: Iterative tool calling, real-time display, stop button, streaming, model selection
+ * Z.ai Telegram Agent v17.0
+ * Full Agent mode with native ZhipuAI tool calling
+ * Features: Iterative tool loop, real-time display, stop button, model selection, vision
  */
 import {
   getUpdates, deleteWebhook, getMe, sendMessage, answerCallbackQuery,
@@ -9,8 +9,8 @@ import {
   getFile, getFileUrl,
   type TelegramUpdate, type TelegramMessage, type TelegramCallbackQuery,
 } from './telegram.js';
-import { chatCompletion, visionChat, testConnection, type ChatMessage } from './zai.js';
-import { executeTool, parseToolCalls, getAgentSystemPrompt } from './tools.js';
+import { chatCompletion, visionChat, testConnection, type ChatMessage, type ToolCall } from './zai.js';
+import { executeTool, AGENT_TOOLS, getAgentSystemPrompt } from './tools.js';
 import {
   startOperation, getOperation, isRunning, stopOperation,
   updateDisplay, finishDisplay, cleanup, getAbortSignal,
@@ -63,7 +63,7 @@ function isAllowed(from?: { username?: string; id?: number }): boolean {
   return !!from.username && ALLOWED.includes(from.username.toLowerCase());
 }
 
-// ─── Agent Execution (Iterative Tool Loop) ────────────────
+// ─── Agent Execution (Iterative Native Tool Loop) ──────────
 
 async function runAgent(chatId: number, userText: string): Promise<void> {
   if (isRunning(chatId)) {
@@ -90,7 +90,7 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
     }
   }, 4000);
 
-  const MAX_ITERATIONS = 15;
+  const MAX_ITERATIONS = 20;
   let iteration = 0;
   let finalResponse = '';
 
@@ -98,75 +98,74 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
     while (iteration < MAX_ITERATIONS && op.status === 'running') {
       iteration++;
 
-      // Keep context manageable - last 20 messages
-      const contextMessages = session.messages.slice(-20);
+      // Keep context manageable - last 30 messages
+      const contextMessages = session.messages.slice(-30);
 
-      // Call AI
+      // Call AI with native tool definitions
       const response = await chatCompletion(contextMessages, {
         model: session.model,
+        tools: AGENT_TOOLS,
         thinking: session.thinking,
+        maxTokens: 8192,
       });
 
       // Check if stopped during API call
       if (op.status !== 'running') break;
 
-      // Parse tool calls from the response
-      const toolCalls = parseToolCalls(response);
-
-      // Extract text content (remove tool call tags)
-      const textContent = response
-        .replace(/<tool_call[\s\S]*?<\/tool_call[=\s]*>/g, '')
-        .replace(/<think[\s\S]*?<\/think>/g, '')
-        .trim();
-
-      if (toolCalls.length === 0) {
-        // No tools - this is the final response
-        finalResponse = textContent || response.replace(/<think[\s\S]*?<\/think>/g, '').trim();
-        // Add assistant response to session
+      // If no tool calls, this is the final response
+      if (response.toolCalls.length === 0) {
+        finalResponse = response.content || 'تم تنفيذ المهمة.';
         if (finalResponse) {
           session.messages.push({ role: 'assistant', content: finalResponse });
         }
         break;
       }
 
-      // If there's text before tools, send it as a progress update
-      if (textContent) {
-        await sendMessage(chatId, `💭 ${truncateText(escapeHtml(textContent), 1500)}`);
+      // Add assistant message with tool calls to context
+      const assistantMsg: ChatMessage = {
+        role: 'assistant',
+        content: response.content,
+        tool_calls: response.toolCalls,
+      };
+      session.messages.push(assistantMsg);
+
+      // If there's text content before tools, show it
+      if (response.content && response.content.trim()) {
+        const preview = response.content.trim().substring(0, 1000);
+        await sendMessage(chatId, `💭 ${truncateText(escapeHtml(preview), 1500)}`);
       }
 
-      // Execute each tool with real-time display
-      const toolResults: Array<{ tool: string; result: any }> = [];
-
-      for (const call of toolCalls) {
+      // Execute each tool
+      for (const call of response.toolCalls) {
         if (op.status !== 'running') break;
 
-        // Show what tool is being called
-        await sendMessage(chatId, `🔧 <b>تنفيذ:</b> ${escapeHtml(call.tool)}(${escapeHtml(Object.entries(call.params).map(([k, v]) => `${k}=${String(v).substring(0, 30)}`).join(', '))})`);
+        let params: Record<string, any> = {};
+        try {
+          params = JSON.parse(call.function.arguments);
+        } catch {
+          params = { raw: call.function.arguments };
+        }
 
-        const result = await executeTool(call.tool, call.params, chatId);
-        toolResults.push({ tool: call.tool, result });
+        // Show what tool is being called
+        const paramPreview = Object.entries(params).map(([k, v]) => `${k}=${String(v).substring(0, 40)}`).join(', ');
+        await sendMessage(chatId, `🔧 <b>تنفيذ:</b> ${escapeHtml(call.function.name)}(${escapeHtml(paramPreview.substring(0, 150))})`);
+
+        // Execute the tool
+        const result = await executeTool(call.function.name, params, chatId);
 
         // Send tool result summary
         const icon = result.success ? '✅' : '❌';
-        const resultPreview = result.output.substring(0, 500);
-        await sendMessage(chatId, `${icon} <b>${escapeHtml(call.tool)}</b>:\n<code>${escapeHtml(resultPreview)}</code>`);
-      }
+        const resultPreview = result.output.substring(0, 600);
+        await sendMessage(chatId, `${icon} <b>${escapeHtml(call.function.name)}</b>:\n<code>${escapeHtml(resultPreview)}</code>`);
 
-      // Build assistant message for context
-      let assistantMsg = textContent || 'تم تنفيذ العمليات.';
-      for (const tr of toolResults) {
-        assistantMsg += `\n[${tr.tool}: ${tr.result.success ? 'OK' : 'FAIL'}]`;
+        // Add tool result to session for context
+        session.messages.push({
+          role: 'tool',
+          content: result.output.substring(0, 3000),
+          tool_call_id: call.id,
+          name: call.function.name,
+        });
       }
-      session.messages.push({ role: 'assistant', content: assistantMsg });
-
-      // Add tool results as next user message for context
-      let toolContext = 'نتائج العمليات المنفذة:\n\n';
-      for (const tr of toolResults) {
-        const icon = tr.result.success ? '✅' : '❌';
-        toolContext += `${icon} ${tr.tool}:\n${tr.result.output.substring(0, 1500)}\n\n`;
-      }
-      toolContext += '\nاستمر في التنفيذ أو قدم النتيجة النهائية للمستخدم إذا انتهيت.';
-      session.messages.push({ role: 'user', content: toolContext });
 
       // Show iteration progress
       const doneCount = op.steps.filter(s => s.status === 'done').length;
@@ -191,7 +190,8 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
   } catch (error: any) {
     if (op.status === 'running') {
       op.status = 'failed';
-      await sendMessage(chatId, `❌ <b>خطأ!</b>\n\n${escapeHtml((error.message || 'Unknown error').substring(0, 300))}`, {
+      const errMsg = (error.message || 'Unknown error').substring(0, 500);
+      await sendMessage(chatId, `❌ <b>خطأ!</b>\n\n${escapeHtml(errMsg)}`, {
         reply_markup: { inline_keyboard: [[{ text: '🔄 إعادة', callback_data: 'retry_last' }]] },
       });
     }
@@ -205,7 +205,7 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
 
 async function handleStart(chatId: number) {
   await sendMessage(chatId, `
-🤖 <b>Z.ai Agent v16.0</b>
+🤖 <b>Z.ai Agent v17.0</b>
 
 أنا وكيل ذكي يعمل مثل وضع Agent في chat.z.ai!
 أستطيع بناء تطبيقات، كتابة كود، تنفيذ أوامر، بحث الويب، وأكثر.
@@ -277,10 +277,12 @@ async function handleModels(chatId: number) {
   const models = [
     { id: 'glm-4-flash', name: 'GLM-4 Flash ⚡', desc: 'سريع وفعال' },
     { id: 'glm-4-plus', name: 'GLM-4 Plus 💎', desc: 'متميز' },
-    { id: 'glm-4v', name: 'GLM-4V 🖼️', desc: 'بصري' },
-    { id: 'glm-5.1', name: 'GLM-5.1 🌟', desc: 'الأحدث مع تفكير' },
-    { id: 'glm-5.1-plus', name: 'GLM-5.1 Plus 👑', desc: 'أقصى جودة' },
-    { id: 'glm-5.1v', name: 'GLM-5.1V 👁️', desc: 'بصري متقدم' },
+    { id: 'glm-4v-flash', name: 'GLM-4V Flash 🖼️', desc: 'بصري سريع' },
+    { id: 'glm-4v-plus', name: 'GLM-4V Plus 🖼️', desc: 'بصري متميز' },
+    { id: 'glm-4-long', name: 'GLM-4 Long 📚', desc: 'سياق طويل' },
+    { id: 'glm-4-air', name: 'GLM-4 Air 🌬️', desc: 'متوازن' },
+    { id: 'glm-z1-air', name: 'GLM-Z1 Air 🧠', desc: 'تفكير' },
+    { id: 'glm-z1-flash', name: 'GLM-Z1 Flash ⚡🧠', desc: 'تفكير سريع' },
   ];
 
   const buttons = models.map(m => [{
@@ -293,7 +295,7 @@ async function handleModels(chatId: number) {
   });
 }
 
-// ─── Last message tracking for retry ──────────────────────
+// ─── Last message tracking ─────────────────────────────────
 
 const lastUserMessage: Map<number, string> = new Map();
 
@@ -413,7 +415,7 @@ async function handleMessage(msg: TelegramMessage) {
 
       if (fileUrl) {
         const caption = msg.caption || 'حلل هذه الصورة';
-        const visionModel = session.model.includes('v') ? session.model : 'glm-4v';
+        const visionModel = session.model.includes('4v') ? session.model : 'glm-4v-flash';
         const response = await visionChat([{
           role: 'user',
           content: [
@@ -445,7 +447,7 @@ async function poll(): Promise<void> {
   if (isPolling) return;
   isPolling = true;
   try {
-    const result = await getUpdates(lastUpdateId + 1, 30);
+    const result = await getUpdates(lastUpdateId + 1, 0);
     if (!result?.ok) {
       const desc = result?.description || 'Unknown';
       if (desc.includes('Conflict')) {
@@ -488,7 +490,7 @@ async function poll(): Promise<void> {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
-  console.log('[Bot] Z.ai Agent v16.0 starting...');
+  console.log('[Bot] Z.ai Agent v17.0 starting...');
 
   // Test Telegram connection
   const me = await getMe();
@@ -508,8 +510,8 @@ async function main() {
   await deleteWebhook();
   console.log('[Bot] Webhook deleted, starting polling...');
 
-  // Poll loop - short polling with 1s interval to avoid conflicts
-  const loop = () => poll().finally(() => setTimeout(loop, 1000));
+  // Poll loop - short polling with 1.5s interval
+  const loop = () => poll().finally(() => setTimeout(loop, 1500));
   loop();
 
   // Heartbeat
@@ -524,7 +526,7 @@ process.on('SIGTERM', () => { console.log('\n[Bot] SIGTERM received'); process.e
 process.on('uncaughtException', (e) => { console.error('[Uncaught]:', e); });
 process.on('unhandledRejection', (r) => { console.error('[Unhandled]:', r); });
 
-// Keep process alive - prevent silent exit
+// Keep process alive
 setInterval(() => {}, 30000);
 
 main();

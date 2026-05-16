@@ -1,7 +1,7 @@
 {
   "name": "zai-telegram-agent",
-  "version": "16.0.0",
-  "description": "Z.ai Telegram Agent v16.0 - Full agent mode like chat.z.ai",
+  "version": "17.0.0",
+  "description": "Z.ai Telegram Agent v17.0 - Full agent with native tool calling",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
@@ -9,7 +9,6 @@
     "dev": "npx tsx --watch src/index.ts"
   },
   "dependencies": {
-    "z-ai-web-dev-sdk": "^0.0.17",
     "form-data": "^4.0.0"
   },
   "devDependencies": {
