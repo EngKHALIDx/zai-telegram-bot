@@ -439,16 +439,32 @@ async function handleMessage(msg: TelegramMessage) {
 
 // ─── Polling ──────────────────────────────────────────────
 
+let pollRetryCount = 0;
+
 async function poll(): Promise<void> {
   if (isPolling) return;
   isPolling = true;
   try {
     const result = await getUpdates(lastUpdateId + 1, 30);
     if (!result?.ok) {
-      console.error('[Poll] Error:', result?.description || 'Unknown');
+      const desc = result?.description || 'Unknown';
+      if (desc.includes('Conflict')) {
+        pollRetryCount++;
+        if (pollRetryCount > 5) {
+          console.warn('[Poll] Conflict persists, waiting 30s...');
+          await new Promise(r => setTimeout(r, 30000));
+          pollRetryCount = 0;
+        } else {
+          console.warn(`[Poll] Conflict (${pollRetryCount}), retrying...`);
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      } else {
+        console.error('[Poll] Error:', desc);
+      }
       isPolling = false;
       return;
     }
+    pollRetryCount = 0;
     const updates: TelegramUpdate[] = result.result || [];
     for (const u of updates) {
       if (u.update_id > lastUpdateId) lastUpdateId = u.update_id;
