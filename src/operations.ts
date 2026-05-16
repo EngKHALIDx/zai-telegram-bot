@@ -1,6 +1,6 @@
 /**
- * Real-time Operations Display System v17.0
- * Shows what the agent is doing in real-time like chat.z.ai
+ * Real-time Operations Display System v18.0
+ * Enhanced with streaming output, progress bar, per-step timer, and chat.z.ai style UX
  */
 import { sendMessage, editMessageText, escapeHtml, truncateText } from './telegram.js';
 
@@ -24,6 +24,8 @@ export interface ActiveOperation {
   currentStep: number;
   lastUpdateTime: number;
   displayTimer: NodeJS.Timeout | null;
+  streamingOutput: string;
+  totalStepsEstimate: number;
 }
 
 const activeOps: Map<number, ActiveOperation> = new Map();
@@ -42,6 +44,8 @@ export function startOperation(chatId: number, userMessage: string): ActiveOpera
     currentStep: 0,
     lastUpdateTime: 0,
     displayTimer: null,
+    streamingOutput: '',
+    totalStepsEstimate: 0,
   };
 
   activeOps.set(chatId, op);
@@ -93,6 +97,7 @@ export function addStep(chatId: number, tool: string, input: string): number {
     startedAt: Date.now(),
   });
   op.currentStep = idx;
+  op.streamingOutput = ''; // Reset streaming for new step
   return idx;
 }
 
@@ -108,7 +113,34 @@ export function updateStep(chatId: number, stepIndex: number, status: OperationS
   }
 }
 
-// ─── Display ────────────────────────────────────────────────
+/**
+ * Set streaming output for the current step (used by run_shell to show partial output).
+ */
+export function setStreamingOutput(chatId: number, output: string): void {
+  const op = activeOps.get(chatId);
+  if (op && op.status === 'running') {
+    op.streamingOutput = output;
+  }
+}
+
+/**
+ * Set estimated total steps for progress bar.
+ */
+export function setTotalStepsEstimate(chatId: number, total: number): void {
+  const op = activeOps.get(chatId);
+  if (op) op.totalStepsEstimate = total;
+}
+
+// ─── Progress Bar ─────────────────────────────────────────
+
+function progressBar(done: number, total: number, width = 10): string {
+  if (total <= 0) return '';
+  const filled = Math.min(Math.round((done / total) * width), width);
+  const empty = width - filled;
+  return '█'.repeat(filled) + '░'.repeat(empty);
+}
+
+// ─── Display ──────────────────────────────────────────────
 
 function formatOperation(op: ActiveOperation): string {
   const elapsed = Math.floor((Date.now() - op.startedAt) / 1000);
@@ -121,28 +153,54 @@ function formatOperation(op: ActiveOperation): string {
 
   const doneCount = op.steps.filter(s => s.status === 'done').length;
   const failCount = op.steps.filter(s => s.status === 'failed').length;
+  const runningCount = op.steps.filter(s => s.status === 'running').length;
   const totalCount = op.steps.length;
 
-  let text = `${statusEmoji} <b>Agent — ${statusText}</b>\n`;
-  text += `⏱️ ${timeStr} | 📊 ${doneCount}✅ ${failCount}❌ / ${totalCount} خطوة\n`;
-  text += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+  // Progress bar
+  const total = Math.max(op.totalStepsEstimate, totalCount);
+  const bar = total > 0 ? progressBar(doneCount + failCount, total) : '';
+  const progressStr = bar ? `${bar} ${doneCount + failCount}/${total} خطوات` : '';
 
-  for (let i = 0; i < op.steps.length; i++) {
+  let text = `${statusEmoji} <b>Agent — ${statusText}</b>\n`;
+  text += `⏱️ ${timeStr} | 📊 ${doneCount}✅ ${failCount}❌ / ${totalCount} خطوة`;
+  if (progressStr) text += `\n📊 ${progressStr}`;
+  text += `\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  // Show steps (last 6 for space)
+  const startIdx = Math.max(0, op.steps.length - 6);
+  for (let i = startIdx; i < op.steps.length; i++) {
     const step = op.steps[i];
     const icon = step.status === 'running' ? '🔄' : step.status === 'done' ? '✅' : step.status === 'failed' ? '❌' : '⏹️';
-    const durationStr = step.duration ? ` <code>${(step.duration / 1000).toFixed(1)}s</code>` : '';
-    const toolIcon = getToolIcon(step.tool);
 
+    // Per-step timer
+    let durationStr = '';
+    if (step.status === 'running' && step.startedAt) {
+      const stepElapsed = Math.floor((Date.now() - step.startedAt) / 1000);
+      durationStr = ` <code>${stepElapsed}s</code>`;
+    } else if (step.duration) {
+      durationStr = ` <code>${(step.duration / 1000).toFixed(1)}s</code>`;
+    }
+
+    const toolIcon = getToolIcon(step.tool);
     text += `${icon} <b>${toolIcon} ${escapeHtml(step.tool)}</b>${durationStr}\n`;
 
     if (step.input) {
       text += `   📥 <code>${escapeHtml(step.input.substring(0, 80))}</code>\n`;
     }
-    if (step.output && (step.status === 'done' || step.status === 'failed')) {
+
+    // Show streaming output for running steps
+    if (step.status === 'running' && op.streamingOutput) {
+      const streamPreview = op.streamingOutput.substring(op.streamingOutput.length - 200).replace(/\n/g, ' ');
+      text += `   📡 <code>${escapeHtml(streamPreview)}</code>\n`;
+    } else if (step.output && (step.status === 'done' || step.status === 'failed')) {
       const preview = step.output.substring(0, 120).replace(/\n/g, ' ');
       text += `   📤 ${escapeHtml(preview)}${step.output.length > 120 ? '…' : ''}\n`;
     }
     text += '\n';
+  }
+
+  if (startIdx > 0) {
+    text += `   ... و ${startIdx} خطوة سابقة\n`;
   }
 
   return truncateText(text, 3800);
@@ -168,7 +226,10 @@ export async function updateDisplay(chatId: number): Promise<void> {
   const text = formatOperation(op);
   const replyMarkup = op.status === 'running'
     ? { inline_keyboard: [[{ text: '⏹️ إيقاف', callback_data: 'stop_op' }]] }
-    : { inline_keyboard: [[{ text: '🔄 مهمة جديدة', callback_data: 'new_agent' }, { text: '📊 النتائج', callback_data: 'show_results' }]] };
+    : { inline_keyboard: [
+        [{ text: '🔄 مهمة جديدة', callback_data: 'new_agent' }, { text: '📊 النتائج', callback_data: 'show_results' }],
+        [{ text: '🌟 النموذج', callback_data: 'models' }],
+      ] };
 
   try {
     if (op.statusMessageId) {
@@ -195,6 +256,7 @@ export async function finishDisplay(chatId: number, finalOutput: string): Promis
   if (!op) return;
 
   op.status = 'done';
+  op.streamingOutput = '';
   if (op.displayTimer) { clearInterval(op.displayTimer); op.displayTimer = null; }
   op.lastUpdateTime = 0;
   await updateDisplay(chatId);

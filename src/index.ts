@@ -1,20 +1,31 @@
 /**
- * Z.ai Telegram Agent v17.0
- * Full Agent mode with native ZhipuAI tool calling
- * Features: Iterative tool loop, real-time display, stop button, model selection, vision
+ * Z.ai Telegram Agent v18.0
+ * Production-ready Agent bot with isolated sandboxes, concurrency limits,
+ * real-time operations display, file browser, process tracking, streaming
  */
 import {
   getUpdates, deleteWebhook, getMe, sendMessage, answerCallbackQuery,
   sendChatAction, editMessageText, escapeHtml, truncateText,
-  getFile, getFileUrl,
+  getFile, getFileUrl, buildFileBrowserKeyboard,
   type TelegramUpdate, type TelegramMessage, type TelegramCallbackQuery,
 } from './telegram.js';
-import { chatCompletion, visionChat, testConnection, type ChatMessage, type ToolCall } from './zai.js';
-import { executeTool, AGENT_TOOLS, getAgentSystemPrompt } from './tools.js';
+import { chatCompletion, visionChat, testConnection, type ChatMessage } from './zai.js';
+import { executeTool, AGENT_TOOLS } from './tools.js';
 import {
   startOperation, getOperation, isRunning, stopOperation,
   updateDisplay, finishDisplay, cleanup, getAbortSignal,
 } from './operations.js';
+import {
+  createSandbox, getOrCreateSandbox, getActiveSandbox, getSandboxById,
+  releaseSandbox, listSandboxes, canCreateSandbox, getActiveCount,
+  getMaxSandboxes, getSessionHistory, startIdleCleanup, stopIdleCleanup,
+  touchSandbox, switchSandbox,
+} from './sandbox.js';
+import { killAllForChat, killProcess, getProcesses, getAllProcesses } from './process-manager.js';
+import { getCommand, getAllCommands } from './commands.js';
+import type { BotContext } from './commands.js';
+import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 
 const ALLOWED = (process.env.ALLOWED_USERNAMES || '').split(',').map(u => u.trim().replace('@', '').toLowerCase()).filter(u => u);
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'glm-4-flash';
@@ -22,38 +33,6 @@ const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'glm-4-flash';
 let lastUpdateId = 0;
 let isPolling = false;
 const startTime = Date.now();
-
-// ─── Session Storage ────────────────────────────────────────
-
-interface Session {
-  id: string;
-  chatId: number;
-  messages: ChatMessage[];
-  model: string;
-  thinking: boolean;
-  createdAt: number;
-}
-
-const sessions: Map<number, Session> = new Map();
-
-function getSession(chatId: number): Session {
-  if (!sessions.has(chatId)) {
-    sessions.set(chatId, {
-      id: Date.now().toString(36) + Math.random().toString(36).substring(2, 8),
-      chatId,
-      messages: [{ role: 'system', content: getAgentSystemPrompt() }],
-      model: DEFAULT_MODEL,
-      thinking: false,
-      createdAt: Date.now(),
-    });
-  }
-  return sessions.get(chatId)!;
-}
-
-function resetSession(chatId: number): Session {
-  sessions.delete(chatId);
-  return getSession(chatId);
-}
 
 // ─── Auth ──────────────────────────────────────────────────
 
@@ -73,11 +52,25 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
     return;
   }
 
-  const session = getSession(chatId);
+  // Ensure sandbox exists and check limits
+  let sandbox = getActiveSandbox(chatId);
+  if (!sandbox) {
+    if (!canCreateSandbox()) {
+      const count = getActiveCount();
+      const max = getMaxSandboxes();
+      await sendMessage(chatId, `⚠️ <b>البيئات المعزولة النشطة تجاوزت الحد (${count}/${max})</b>\n\nيرجى تحرير البيئات غير الضرورية للمتابعة. استخدم /sandboxes أو /release`, {
+        reply_markup: { inline_keyboard: [[{ text: '📦 البيئات', callback_data: 'sandboxes' }]] },
+      });
+      return;
+    }
+    sandbox = createSandbox(chatId)!;
+  }
+
   const op = startOperation(chatId, userText);
+  touchSandbox(chatId);
 
   // Add user message to session
-  session.messages.push({ role: 'user', content: userText });
+  sandbox.messages.push({ role: 'user', content: userText });
 
   // Send initial status
   await sendMessage(chatId, `⏳ <b>جاري التحليل...</b>\n📝 ${escapeHtml(userText.substring(0, 100))}`);
@@ -98,14 +91,17 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
     while (iteration < MAX_ITERATIONS && op.status === 'running') {
       iteration++;
 
+      // Update estimated steps
+      op.totalStepsEstimate = Math.max(op.totalStepsEstimate, iteration * 2);
+
       // Keep context manageable - last 30 messages
-      const contextMessages = session.messages.slice(-30);
+      const contextMessages = sandbox.messages.slice(-30);
 
       // Call AI with native tool definitions
       const response = await chatCompletion(contextMessages, {
-        model: session.model,
+        model: sandbox.model,
         tools: AGENT_TOOLS,
-        thinking: session.thinking,
+        thinking: sandbox.thinking,
         maxTokens: 8192,
       });
 
@@ -116,7 +112,7 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
       if (response.toolCalls.length === 0) {
         finalResponse = response.content || 'تم تنفيذ المهمة.';
         if (finalResponse) {
-          session.messages.push({ role: 'assistant', content: finalResponse });
+          sandbox.messages.push({ role: 'assistant', content: finalResponse });
         }
         break;
       }
@@ -127,7 +123,7 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
         content: response.content,
         tool_calls: response.toolCalls,
       };
-      session.messages.push(assistantMsg);
+      sandbox.messages.push(assistantMsg);
 
       // If there's text content before tools, show it
       if (response.content && response.content.trim()) {
@@ -151,7 +147,7 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
         await sendMessage(chatId, `🔧 <b>تنفيذ:</b> ${escapeHtml(call.function.name)}(${escapeHtml(paramPreview.substring(0, 150))})`);
 
         // Execute the tool
-        const result = await executeTool(call.function.name, params, chatId);
+        const result = await executeTool(call.function.name, params, chatId, sandbox);
 
         // Send tool result summary
         const icon = result.success ? '✅' : '❌';
@@ -159,7 +155,7 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
         await sendMessage(chatId, `${icon} <b>${escapeHtml(call.function.name)}</b>:\n<code>${escapeHtml(resultPreview)}</code>`);
 
         // Add tool result to session for context
-        session.messages.push({
+        sandbox.messages.push({
           role: 'tool',
           content: result.output.substring(0, 3000),
           tool_call_id: call.id,
@@ -173,6 +169,8 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
       await sendMessage(chatId, `🔄 <b>الخطوة ${iteration}/${MAX_ITERATIONS}</b> — ✅${doneCount} ❌${failCount} ⏳متابعة...`, {
         reply_markup: { inline_keyboard: [[{ text: '⏹️ إيقاف', callback_data: 'stop_op' }]] },
       });
+
+      touchSandbox(chatId);
     }
 
     if (iteration >= MAX_ITERATIONS && !finalResponse) {
@@ -198,101 +196,119 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
   } finally {
     clearInterval(typingInterval);
     cleanup(chatId);
+    touchSandbox(chatId);
   }
 }
 
-// ─── Command Handlers ──────────────────────────────────────
+// ─── File Browser ──────────────────────────────────────────
 
-async function handleStart(chatId: number) {
-  await sendMessage(chatId, `
-🤖 <b>Z.ai Agent v17.0</b>
+async function handleFileBrowse(chatId: number, data: string): Promise<void> {
+  const sandbox = getActiveSandbox(chatId);
+  if (!sandbox) {
+    await sendMessage(chatId, '❌ لا توجد جلسة نشطة. استخدم /new أولاً.');
+    return;
+  }
 
-أنا وكيل ذكي يعمل مثل وضع Agent في chat.z.ai!
-أستطيع بناء تطبيقات، كتابة كود، تنفيذ أوامر، بحث الويب، وأكثر.
+  const workDir = sandbox.workDir;
 
-🏗️ <b>ما يمكنني فعله:</b>
-• بناء مواقع وتطبيقات كاملة
-• إنشاء مشاريع ورفعها على GitHub
-• كتابة وتنفيذ كود JavaScript/Python/Bash
-• بحث في الويب وإنشاء صور بالذكاء الاصطناعي
-• تحليل الملفات والإجابة على الأسئلة
-• تنفيذ أوامر Shell على النظام مباشرة
-
-📋 <b>الأوامر:</b>
-/new — مهمة جديدة (جلسة نظيفة)
-/model — اختيار النموذج
-/think — التفكير العميق
-/stop — إيقاف العملية الحالية
-/status — حالة العملية الجارية
-/reset — إعادة تعيين كل شيء
-
-💡 <b>أرسل أي طلب وسأبدأ العمل فوراً!</b>
-`, {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '🆕 مهمة جديدة', callback_data: 'new_agent' }],
-        [
-          { text: '🌟 النموذج', callback_data: 'models' },
-          { text: '🧠 التفكير', callback_data: 'toggle_thinking' },
-        ],
-        [{ text: '📊 حالة النظام', callback_data: 'status' }],
-      ],
-    },
-  });
+  if (data === 'browse_root') {
+    // Show workspace root
+    await showDirectory(chatId, workDir, '');
+  } else if (data.startsWith('browse_dir_')) {
+    const dirPath = data.replace('browse_dir_', '');
+    const fullPath = join(workDir, dirPath);
+    await showDirectory(chatId, fullPath, dirPath);
+  } else if (data.startsWith('browse_file_')) {
+    const filePath = data.replace('browse_file_', '');
+    await showFile(chatId, workDir, filePath);
+  } else if (data.startsWith('browse_send_')) {
+    const filePath = data.replace('browse_send_', '');
+    await sendFileFromWorkspace(chatId, workDir, filePath);
+  }
 }
 
-async function handleStatus(chatId: number) {
-  const session = getSession(chatId);
-  const uptime = Math.floor((Date.now() - startTime) / 1000);
-  const sessionAge = Math.floor((Date.now() - session.createdAt) / 60000);
-  const running = isRunning(chatId);
-
-  let text = `📊 <b>حالة النظام</b>\n\n`;
-  text += `🟢 البوت: يعمل\n`;
-  text += `⏱️ مدة التشغيل: ${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m\n`;
-  text += `🤖 النموذج: <code>${session.model}</code>\n`;
-  text += `🧠 التفكير: ${session.thinking ? '✅ مفعل' : '❌ معطل'}\n`;
-  text += `📝 الجلسة: ${session.messages.length} رسالة (${sessionAge} دقيقة)\n`;
-  text += `⏳ العمليات: ${running ? '🔴 جارية' : '🟢 لا توجد'}\n`;
-
-  if (running) {
-    const op = getOperation(chatId);
-    if (op) {
-      const doneCount = op.steps.filter(s => s.status === 'done').length;
-      const failCount = op.steps.filter(s => s.status === 'failed').length;
-      const elapsed = Math.floor((Date.now() - op.startedAt) / 1000);
-      text += `\n📋 <b>العملية الجارية:</b>\n`;
-      text += `📝 ${escapeHtml(op.userMessage.substring(0, 80))}\n`;
-      text += `⏱️ ${elapsed}s | ✅${doneCount} ❌${failCount} / ${op.steps.length} خطوة`;
+async function showDirectory(chatId: number, dirPath: string, relativePath: string): Promise<void> {
+  try {
+    if (!existsSync(dirPath)) {
+      await sendMessage(chatId, '❌ الدليل غير موجود.');
+      return;
     }
-  }
 
-  await sendMessage(chatId, text, {
-    reply_markup: running ? { inline_keyboard: [[{ text: '⏹️ إيقاف', callback_data: 'stop_op' }]] } : undefined,
-  });
+    const entries = readdirSync(dirPath, { withFileTypes: true });
+    const fileEntries = entries
+      .filter(e => e.name !== 'node_modules' && e.name !== '.git' && e.name !== '.next')
+      .map(e => ({
+        name: e.name,
+        isDirectory: e.isDirectory(),
+        size: e.isDirectory() ? undefined : statSync(join(dirPath, e.name)).size,
+      }));
+
+    const keyboard = buildFileBrowserKeyboard(fileEntries, relativePath);
+    const dirName = relativePath || '/';
+    const fileCount = fileEntries.filter(e => !e.isDirectory).length;
+    const dirCount = fileEntries.filter(e => e.isDirectory).length;
+
+    await sendMessage(chatId, `📂 <b>${escapeHtml(dirName)}</b>\n\n📁 ${dirCount} مجلد | 📄 ${fileCount} ملف`, {
+      reply_markup: { inline_keyboard: keyboard },
+    });
+  } catch (e: any) {
+    await sendMessage(chatId, `❌ خطأ في فتح الدليل: ${escapeHtml(e.message?.substring(0, 200))}`);
+  }
 }
 
-async function handleModels(chatId: number) {
-  const session = getSession(chatId);
-  const models = [
-    { id: 'glm-4-flash', name: 'GLM-4 Flash ⚡', desc: 'سريع وفعال' },
-    { id: 'glm-4-plus', name: 'GLM-4 Plus 💎', desc: 'متميز' },
-    { id: 'glm-4v-flash', name: 'GLM-4V Flash 🖼️', desc: 'بصري سريع' },
-    { id: 'glm-4v-plus', name: 'GLM-4V Plus 🖼️', desc: 'بصري متميز' },
-    { id: 'glm-4-long', name: 'GLM-4 Long 📚', desc: 'سياق طويل' },
-    { id: 'glm-4-air', name: 'GLM-4 Air 🌬️', desc: 'متوازن' },
-    { id: 'glm-z1-air', name: 'GLM-Z1 Air 🧠', desc: 'تفكير' },
-    { id: 'glm-z1-flash', name: 'GLM-Z1 Flash ⚡🧠', desc: 'تفكير سريع' },
-  ];
+async function showFile(chatId: number, workDir: string, filePath: string): Promise<void> {
+  try {
+    const fullPath = join(workDir, filePath);
+    if (!existsSync(fullPath)) {
+      await sendMessage(chatId, '❌ الملف غير موجود.');
+      return;
+    }
 
-  const buttons = models.map(m => [{
-    text: `${m.name}${m.id === session.model ? ' ✅' : ''} — ${m.desc}`,
-    callback_data: `model_${m.id}`,
-  }]);
+    const stat = statSync(fullPath);
+    const sizeKB = (stat.size / 1024).toFixed(1);
+    const content = readFileSync(fullPath, 'utf-8');
+    const isLarge = content.length > 3500;
+    const preview = content.substring(0, 3500);
 
-  await sendMessage(chatId, `🌟 <b>اختيار النموذج</b>\n\nالحالي: <code>${session.model}</code>`, {
-    reply_markup: { inline_keyboard: buttons },
-  });
+    let text = `📄 <b>${escapeHtml(filePath)}</b>\n`;
+    text += `📊 الحجم: ${sizeKB}KB\n`;
+    text += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+    text += `<code>${escapeHtml(preview)}</code>`;
+    if (isLarge) text += '\n\n... (محتوى مقطوع)';
+
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+
+    // Send as document button
+    buttons.push([{ text: '📨 إرسال كملف', callback_data: `browse_send_${filePath}` }]);
+
+    // Go back to directory
+    const parentDir = filePath.split('/').slice(0, -1).join('/');
+    buttons.push([{ text: '📂 العودة للمجلد', callback_data: parentDir ? `browse_dir_${parentDir}` : 'browse_root' }]);
+
+    await sendMessage(chatId, truncateText(text), {
+      reply_markup: { inline_keyboard: buttons },
+    });
+  } catch (e: any) {
+    await sendMessage(chatId, `❌ خطأ في قراءة الملف: ${escapeHtml(e.message?.substring(0, 200))}`);
+  }
+}
+
+async function sendFileFromWorkspace(chatId: number, workDir: string, filePath: string): Promise<void> {
+  try {
+    const fullPath = join(workDir, filePath);
+    if (!existsSync(fullPath)) {
+      await sendMessage(chatId, '❌ الملف غير موجود.');
+      return;
+    }
+
+    const { sendDocumentBuffer } = await import('./telegram.js');
+    const buffer = readFileSync(fullPath);
+    const fileName = filePath.split('/').pop() || 'file';
+    await sendDocumentBuffer(chatId, Buffer.from(buffer), fileName, filePath);
+    await sendMessage(chatId, `✅ تم إرسال: ${escapeHtml(filePath)}`);
+  } catch (e: any) {
+    await sendMessage(chatId, `❌ خطأ في إرسال الملف: ${escapeHtml(e.message?.substring(0, 200))}`);
+  }
 }
 
 // ─── Last message tracking ─────────────────────────────────
@@ -301,65 +317,167 @@ const lastUserMessage: Map<number, string> = new Map();
 
 // ─── Callback Handler ──────────────────────────────────────
 
-async function handleCallback(cb: TelegramCallbackQuery) {
+async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
   const chatId = cb.message?.chat?.id;
   if (!chatId) return;
   const data = cb.data || '';
   await answerCallbackQuery(cb.id);
 
-  if (data === 'stop_op') {
-    const stopped = stopOperation(chatId);
-    if (stopped) {
-      await sendMessage(chatId, '⏹️ <b>تم إيقاف العملية!</b>');
-      await updateDisplay(chatId);
-    } else {
-      await sendMessage(chatId, 'ℹ️ لا توجد عملية جارية حالياً.');
-    }
-  }
-  else if (data === 'new_agent') {
-    resetSession(chatId);
-    await sendMessage(chatId, '🆕 <b>مهمة جديدة!</b>\n\nجلسة نظيفة — أرسل طلبك وسأبدأ العمل.', {
-      reply_markup: { inline_keyboard: [[{ text: '🌟 النموذج', callback_data: 'models' }]] },
-    });
-  }
-  else if (data === 'models') { await handleModels(chatId); }
-  else if (data === 'toggle_thinking') {
-    const s = getSession(chatId);
-    s.thinking = !s.thinking;
-    await sendMessage(chatId, `🧠 التفكير العميق: ${s.thinking ? '✅ مفعل' : '❌ معطل'}`);
-  }
-  else if (data === 'status') { await handleStatus(chatId); }
-  else if (data === 'show_results') {
-    const op = getOperation(chatId);
-    if (op) {
-      let results = '📊 <b>النتائج:</b>\n\n';
-      for (const step of op.steps) {
-        const icon = step.status === 'done' ? '✅' : step.status === 'failed' ? '❌' : '⏹️';
-        results += `${icon} ${step.tool}: ${escapeHtml((step.output || '').substring(0, 150))}\n`;
+  try {
+    // ─── Operation Controls ──────────────────────────────
+
+    if (data === 'stop_op') {
+      const stopped = stopOperation(chatId);
+      if (stopped) {
+        await sendMessage(chatId, '⏹️ <b>تم إيقاف العملية!</b>');
+        await updateDisplay(chatId);
+      } else {
+        await sendMessage(chatId, 'ℹ️ لا توجد عملية جارية حالياً.');
       }
-      await sendMessage(chatId, results);
     }
-  }
-  else if (data === 'retry_last') {
-    const lastMsg = lastUserMessage.get(chatId);
-    if (lastMsg) {
-      await sendMessage(chatId, '🔄 <b>إعادة المحاولة...</b>');
-      await runAgent(chatId, lastMsg);
-    } else {
-      await sendMessage(chatId, '❌ لا توجد رسالة سابقة لإعادة المحاولة.');
+    else if (data === 'new_agent') {
+      if (!canCreateSandbox()) {
+        const count = getActiveCount();
+        const max = getMaxSandboxes();
+        await sendMessage(chatId, `⚠️ البيئات المعزولة النشطة تجاوزت الحد (${count}/${max}). يرجى تحرير بيئة أولاً.`, {
+          reply_markup: { inline_keyboard: [[{ text: '📦 البيئات', callback_data: 'sandboxes' }]] },
+        });
+        return;
+      }
+      const sb = createSandbox(chatId);
+      if (!sb) {
+        await sendMessage(chatId, '❌ فشل إنشاء بيئة جديدة.');
+        return;
+      }
+      await sendMessage(chatId, `🆕 <b>مهمة جديدة!</b>\n\nجلسة معزولة — <code>${sb.id}</code>\nأرسل طلبك وسأبدأ العمل.`, {
+        reply_markup: { inline_keyboard: [[{ text: '🌟 النموذج', callback_data: 'models' }]] },
+      });
     }
-  }
-  else if (data.startsWith('model_')) {
-    const modelId = data.replace('model_', '');
-    const session = getSession(chatId);
-    session.model = modelId;
-    await sendMessage(chatId, `✅ تم تغيير النموذج إلى: <b>${modelId}</b>`);
+    else if (data === 'models') {
+      const cmd = getCommand('model');
+      if (cmd) {
+        const sandbox = getActiveSandbox(chatId);
+        await cmd.handler({
+          chatId,
+          sandbox,
+          operation: getOperation(chatId),
+          isRunning: isRunning(chatId),
+          startTime,
+          args: '',
+        });
+      }
+    }
+    else if (data.startsWith('model_')) {
+      const modelId = data.replace('model_', '');
+      const sandbox = getActiveSandbox(chatId);
+      if (sandbox) {
+        sandbox.model = modelId;
+        await sendMessage(chatId, `✅ تم تغيير النموذج إلى: <b>${modelId}</b>`);
+      } else {
+        await sendMessage(chatId, '❌ لا توجد جلسة نشطة.');
+      }
+    }
+    else if (data === 'toggle_thinking') {
+      const sandbox = getActiveSandbox(chatId);
+      if (sandbox) {
+        sandbox.thinking = !sandbox.thinking;
+        await sendMessage(chatId, `🧠 التفكير العميق: ${sandbox.thinking ? '✅ مفعل' : '❌ معطل'}`);
+      } else {
+        await sendMessage(chatId, '❌ لا توجد جلسة نشطة.');
+      }
+    }
+    else if (data === 'status') {
+      const cmd = getCommand('status');
+      if (cmd) {
+        await cmd.handler({
+          chatId,
+          sandbox: getActiveSandbox(chatId),
+          operation: getOperation(chatId),
+          isRunning: isRunning(chatId),
+          startTime,
+          args: '',
+        });
+      }
+    }
+    else if (data === 'show_results') {
+      const op = getOperation(chatId);
+      if (op) {
+        let results = '📊 <b>النتائج:</b>\n\n';
+        for (const step of op.steps) {
+          const icon = step.status === 'done' ? '✅' : step.status === 'failed' ? '❌' : '⏹️';
+          results += `${icon} ${step.tool}: ${escapeHtml((step.output || '').substring(0, 150))}\n`;
+        }
+        await sendMessage(chatId, results);
+      }
+    }
+    else if (data === 'retry_last') {
+      const lastMsg = lastUserMessage.get(chatId);
+      if (lastMsg) {
+        await sendMessage(chatId, '🔄 <b>إعادة المحاولة...</b>');
+        await runAgent(chatId, lastMsg);
+      } else {
+        await sendMessage(chatId, '❌ لا توجد رسالة سابقة لإعادة المحاولة.');
+      }
+    }
+    else if (data === 'sandboxes') {
+      const cmd = getCommand('sandboxes');
+      if (cmd) {
+        await cmd.handler({
+          chatId,
+          sandbox: getActiveSandbox(chatId),
+          operation: getOperation(chatId),
+          isRunning: isRunning(chatId),
+          startTime,
+          args: '',
+        });
+      }
+    }
+    else if (data === 'history') {
+      const cmd = getCommand('history');
+      if (cmd) {
+        await cmd.handler({
+          chatId,
+          sandbox: getActiveSandbox(chatId),
+          operation: getOperation(chatId),
+          isRunning: isRunning(chatId),
+          startTime,
+          args: '',
+        });
+      }
+    }
+    else if (data.startsWith('release_')) {
+      const sandboxId = data.replace('release_', '');
+      const result = releaseSandbox(chatId, sandboxId);
+      if (result) {
+        await sendMessage(chatId, `✅ تم تحرير البيئة <b>${sandboxId}</b>`, {
+          reply_markup: { inline_keyboard: [[{ text: '📦 البيئات', callback_data: 'sandboxes' }]] },
+        });
+      } else {
+        await sendMessage(chatId, `❌ لم يتم العثور على البيئة ${sandboxId}`);
+      }
+    }
+    else if (data.startsWith('kill_proc_')) {
+      const pid = parseInt(data.replace('kill_proc_', ''));
+      if (isNaN(pid)) {
+        await sendMessage(chatId, '❌ PID غير صالح.');
+        return;
+      }
+      const killed = killProcess(pid);
+      await sendMessage(chatId, killed ? `✅ تم إيقاف العملية PID ${pid}` : `❌ لم يتم العثور على العملية PID ${pid}`);
+    }
+
+    // ─── File Browser ────────────────────────────────────
+    else if (data.startsWith('browse_')) {
+      await handleFileBrowse(chatId, data);
+    }
+  } catch (e) {
+    console.error('[Callback] Error:', e);
   }
 }
 
 // ─── Message Handler ───────────────────────────────────────
 
-async function handleMessage(msg: TelegramMessage) {
+async function handleMessage(msg: TelegramMessage): Promise<void> {
   const chatId = msg.chat.id;
   if (!msg.from) return;
   if (!isAllowed(msg.from)) {
@@ -369,31 +487,37 @@ async function handleMessage(msg: TelegramMessage) {
 
   const text = msg.text || '';
 
-  // Commands
-  if (text.startsWith('/start') || text.startsWith('/help')) { await handleStart(chatId); return; }
-  if (text.startsWith('/new')) { resetSession(chatId); await sendMessage(chatId, '🆕 <b>جلسة جديدة!</b>\nأرسل طلبك وسأبدأ العمل.'); return; }
-  if (text.startsWith('/model')) { await handleModels(chatId); return; }
-  if (text.startsWith('/think')) {
-    const s = getSession(chatId);
-    s.thinking = !s.thinking;
-    await sendMessage(chatId, `🧠 التفكير العميق: ${s.thinking ? '✅ مفعل' : '❌ معطل'}`);
-    return;
-  }
-  if (text.startsWith('/stop')) {
-    const st = stopOperation(chatId);
-    await sendMessage(chatId, st ? '⏹️ تم الإيقاف' : 'ℹ️ لا توجد عملية جارية');
-    return;
-  }
-  if (text.startsWith('/status')) { await handleStatus(chatId); return; }
-  if (text.startsWith('/reset')) {
-    resetSession(chatId);
-    await sendMessage(chatId, '🔄 تم إعادة تعيين كل شيء. أرسل طلبك من جديد.');
-    return;
+  // ─── Handle Commands ──────────────────────────────────
+
+  if (text.startsWith('/')) {
+    const parts = text.split(' ');
+    const cmdName = parts[0].substring(1).split('@')[0].toLowerCase(); // Remove / and @botname
+    const args = parts.slice(1).join(' ');
+
+    const cmd = getCommand(cmdName);
+    if (cmd) {
+      try {
+        await cmd.handler({
+          chatId,
+          from: msg.from,
+          sandbox: getActiveSandbox(chatId),
+          operation: getOperation(chatId),
+          isRunning: isRunning(chatId),
+          startTime,
+          args,
+        });
+      } catch (e) {
+        console.error(`[Command] ${cmdName} error:`, e);
+        await sendMessage(chatId, `❌ خطأ في تنفيذ الأمر: ${escapeHtml((e as any)?.message?.substring(0, 200))}`);
+      }
+      return;
+    }
   }
 
-  // Handle images with vision
+  // ─── Handle Images/Vision ─────────────────────────────
+
   if (msg.photo || msg.document) {
-    const session = getSession(chatId);
+    const sandbox = getActiveSandbox(chatId);
     if (isRunning(chatId)) {
       await sendMessage(chatId, '⏳ هناك عملية جارية بالفعل!', {
         reply_markup: { inline_keyboard: [[{ text: '⏹️ إيقاف', callback_data: 'stop_op' }]] },
@@ -415,7 +539,7 @@ async function handleMessage(msg: TelegramMessage) {
 
       if (fileUrl) {
         const caption = msg.caption || 'حلل هذه الصورة';
-        const visionModel = session.model.includes('4v') ? session.model : 'glm-4v-flash';
+        const visionModel = sandbox?.model?.includes('4v') ? sandbox.model : 'glm-4v-flash';
         const response = await visionChat([{
           role: 'user',
           content: [
@@ -432,7 +556,8 @@ async function handleMessage(msg: TelegramMessage) {
     return;
   }
 
-  // Text message - run agent
+  // ─── Text message - run agent ─────────────────────────
+
   if (text && !text.startsWith('/')) {
     lastUserMessage.set(chatId, text);
     await runAgent(chatId, text);
@@ -487,16 +612,56 @@ async function poll(): Promise<void> {
   finally { isPolling = false; }
 }
 
+// ─── Health Monitoring ─────────────────────────────────────
+
+function logHealth(): void {
+  const up = Math.floor((Date.now() - startTime) / 1000);
+  const mem = process.memoryUsage();
+  const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
+  console.log(
+    `[Health] ${new Date().toISOString()} | ` +
+    `Up: ${Math.floor(up / 3600)}h ${Math.floor((up % 3600) / 60)}m | ` +
+    `Sandboxes: ${getActiveCount()}/${getMaxSandboxes()} | ` +
+    `Processes: ${getAllProcesses().length} | ` +
+    `Mem: RSS=${mb(mem.rss)}MB Heap=${mb(mem.heapUsed)}/${mb(mem.heapTotal)}MB`
+  );
+}
+
+// ─── Graceful Shutdown ─────────────────────────────────────
+
+let isShuttingDown = false;
+
+function gracefulShutdown(signal: string): void {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`\n[Bot] ${signal} received, shutting down gracefully...`);
+
+  // Stop idle cleanup
+  stopIdleCleanup();
+
+  // Kill all running processes
+  for (const proc of getAllProcesses()) {
+    try { proc.child.kill('SIGTERM'); } catch {}
+  }
+
+  // Stop all operations
+  // (We don't iterate activeOps directly, but we can try to clean up)
+
+  console.log('[Bot] Cleanup complete. Goodbye!');
+  process.exit(0);
+}
+
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
-  console.log('[Bot] Z.ai Agent v17.0 starting...');
+  console.log('[Bot] Z.ai Agent v18.0 starting...');
+  console.log(`[Bot] Max sandboxes: ${getMaxSandboxes()}`);
+  console.log(`[Bot] Allowed users: ${ALLOWED.length > 0 ? ALLOWED.join(', ') : 'Everyone'}`);
 
   // Test Telegram connection
   const me = await getMe();
   if (!me?.ok) { console.error('[FATAL] Bad bot token:', me?.description); process.exit(1); }
   console.log(`[Bot] Connected: @${me.result.username} (${me.result.first_name})`);
-  console.log(`[Bot] Allowed: ${ALLOWED.length > 0 ? ALLOWED.join(', ') : 'Everyone'}`);
 
   // Test Z.ai API connection
   const apiTest = await testConnection();
@@ -510,21 +675,47 @@ async function main() {
   await deleteWebhook();
   console.log('[Bot] Webhook deleted, starting polling...');
 
+  // Start idle cleanup
+  startIdleCleanup();
+
   // Poll loop - short polling with 1.5s interval
   const loop = () => poll().finally(() => setTimeout(loop, 1500));
   loop();
 
-  // Heartbeat
-  setInterval(() => {
-    const up = Math.floor((Date.now() - startTime) / 1000);
-    console.log(`[Heartbeat] ${new Date().toISOString()} | Up: ${Math.floor(up / 3600)}h ${Math.floor((up % 3600) / 60)}m | Sessions: ${sessions.size}`);
-  }, 60000);
+  // Health monitoring every 60s
+  setInterval(logHealth, 60000);
+
+  // Initial health log
+  logHealth();
+
+  // Set up command list for Telegram (optional)
+  const commands = getAllCommands();
+  console.log(`[Bot] Registered ${commands.length} commands: ${commands.map(c => `/${c.name}`).join(', ')}`);
 }
 
-process.on('SIGINT', () => { console.log('\n[Bot] Shutting down...'); process.exit(0); });
-process.on('SIGTERM', () => { console.log('\n[Bot] SIGTERM received'); process.exit(0); });
-process.on('uncaughtException', (e) => { console.error('[Uncaught]:', e); });
-process.on('unhandledRejection', (r) => { console.error('[Unhandled]:', r); });
+// ─── Process Event Handlers ────────────────────────────────
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+// Auto-restart on uncaught exceptions (with cooldown)
+let lastCrash = 0;
+const CRASH_COOLDOWN = 10000; // 10 seconds
+
+process.on('uncaughtException', (e) => {
+  console.error('[Uncaught]:', e);
+  const now = Date.now();
+  if (now - lastCrash < CRASH_COOLDOWN) {
+    console.error('[Bot] Crashing too fast, giving up.');
+    process.exit(1);
+  }
+  lastCrash = now;
+  console.log('[Bot] Recovering from uncaught exception...');
+});
+
+process.on('unhandledRejection', (r) => {
+  console.error('[Unhandled Rejection]:', r);
+});
 
 // Keep process alive
 setInterval(() => {}, 30000);

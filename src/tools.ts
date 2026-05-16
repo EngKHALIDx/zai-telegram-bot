@@ -1,16 +1,17 @@
 /**
- * Agent Tools v17.0 - Native function calling with 13 tools
- * Each tool has proper JSON Schema definition for ZhipuAI API
+ * Agent Tools v18.0 - Native function calling with 13 tools
+ * Enhanced with process tracking and sandbox-aware working directories
  */
 import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync } from 'fs';
 import { join, dirname } from 'path';
-import { exec, execSync } from 'child_process';
+import { exec, execSync, type ChildProcess } from 'child_process';
 import { sendDocumentBuffer, sendPhotoBuffer, sendMessage, escapeHtml } from './telegram.js';
 import { webSearch, generateImage } from './zai.js';
 import type { ToolDefinition } from './zai.js';
-import { addStep, updateStep, updateDisplay, getAbortSignal } from './operations.js';
+import { addStep, updateStep, updateDisplay, getAbortSignal, setStreamingOutput } from './operations.js';
+import { trackProcess, killProcess, getProcesses } from './process-manager.js';
+import type { Sandbox } from './sandbox.js';
 
-const WORK_DIR = join(process.cwd(), 'workspace');
 const GH_TOKEN = process.env.GH_PAT || process.env.GH_TOKEN || '';
 const GH_USERNAME = process.env.GH_USERNAME || '';
 
@@ -227,8 +228,14 @@ export const AGENT_TOOLS: ToolDefinition[] = [
 
 // ─── Tool Execution ────────────────────────────────────────
 
-export async function executeTool(toolName: string, params: Record<string, any>, chatId: number): Promise<ToolResult> {
-  if (!existsSync(WORK_DIR)) mkdirSync(WORK_DIR, { recursive: true });
+export async function executeTool(
+  toolName: string,
+  params: Record<string, any>,
+  chatId: number,
+  sandbox: Sandbox
+): Promise<ToolResult> {
+  const workDir = sandbox.workDir;
+  if (!existsSync(workDir)) mkdirSync(workDir, { recursive: true });
 
   const inputPreview = Object.entries(params).map(([k, v]) => `${k}=${String(v).substring(0, 50)}`).join(', ');
   const stepIdx = addStep(chatId, toolName, inputPreview);
@@ -240,19 +247,19 @@ export async function executeTool(toolName: string, params: Record<string, any>,
     let result: ToolResult;
 
     switch (toolName) {
-      case 'run_shell': result = await toolRunShell(params.command, signal); break;
-      case 'install_package': result = await toolInstall(params.package_name, params.package_manager, signal); break;
-      case 'create_file': result = toolCreateFile(params.path, params.content); break;
-      case 'create_project': result = toolCreateProject(params.name, params.description, params.files); break;
-      case 'push_github': result = toolPushGithub(params.repo_name, params.description, params.private); break;
-      case 'send_file': result = await toolSendFile(params.file_path, params.caption, chatId); break;
-      case 'send_project_zip': result = await toolSendProjectZip(params.project_name, params.caption, chatId); break;
+      case 'run_shell': result = await toolRunShell(params.command, signal, chatId, sandbox); break;
+      case 'install_package': result = await toolInstall(params.package_name, params.package_manager, signal, chatId, sandbox); break;
+      case 'create_file': result = toolCreateFile(params.path, params.content, workDir); break;
+      case 'create_project': result = toolCreateProject(params.name, params.description, params.files, workDir); break;
+      case 'push_github': result = toolPushGithub(params.repo_name, params.description, params.private, workDir); break;
+      case 'send_file': result = await toolSendFile(params.file_path, params.caption, chatId, workDir); break;
+      case 'send_project_zip': result = await toolSendProjectZip(params.project_name, params.caption, chatId, workDir); break;
       case 'web_search': result = await toolWebSearch(params.query); break;
-      case 'generate_image': result = await toolGenerateImage(params.prompt, chatId); break;
-      case 'run_code': result = await toolRunCode(params.language, params.code, signal); break;
-      case 'read_file': result = toolReadFile(params.path); break;
-      case 'list_files': result = toolListFiles(params.project_name); break;
-      case 'edit_file': result = toolEditFile(params.path, params.old_text, params.new_text); break;
+      case 'generate_image': result = await toolGenerateImage(params.prompt, chatId, workDir); break;
+      case 'run_code': result = await toolRunCode(params.language, params.code, signal, chatId, sandbox, workDir); break;
+      case 'read_file': result = toolReadFile(params.path, workDir); break;
+      case 'list_files': result = toolListFiles(params.project_name, workDir); break;
+      case 'edit_file': result = toolEditFile(params.path, params.old_text, params.new_text, workDir); break;
       default: result = { success: false, output: `Unknown tool: ${toolName}` };
     }
 
@@ -269,14 +276,21 @@ export async function executeTool(toolName: string, params: Record<string, any>,
 
 // ─── Tool Implementations ───────────────────────────────────
 
-function toolRunShell(command: string, signal?: AbortSignal | null): Promise<ToolResult> {
+function toolRunShell(
+  command: string,
+  signal: AbortSignal | null | undefined,
+  chatId: number,
+  sandbox: Sandbox
+): Promise<ToolResult> {
   return new Promise((resolve) => {
     console.log(`[Shell] ${command.substring(0, 200)}`);
+
     const child = exec(command, {
       encoding: 'utf-8',
       timeout: 120000,
-      cwd: WORK_DIR,
+      cwd: sandbox.workDir,
       maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env },
     }, (error, stdout, stderr) => {
       const out = (stdout || '').substring(0, 5000);
       const err = (stderr || '').substring(0, 2000);
@@ -286,29 +300,84 @@ function toolRunShell(command: string, signal?: AbortSignal | null): Promise<Too
         resolve({ success: true, output: out || '(No output)' });
       }
     });
+
+    // Track the process
+    if (child.pid) {
+      trackProcess(chatId, sandbox.id, command, child);
+      if (!sandbox.activeProcessPids.includes(child.pid)) {
+        sandbox.activeProcessPids.push(child.pid);
+      }
+      // Remove PID when process exits
+      child.on('exit', () => {
+        const idx = sandbox.activeProcessPids.indexOf(child.pid!);
+        if (idx >= 0) sandbox.activeProcessPids.splice(idx, 1);
+      });
+    }
+
+    // Streaming: update display with partial output every 3 seconds
+    let streamBuffer = '';
+    const streamInterval = setInterval(() => {
+      if (streamBuffer.length > 0) {
+        setStreamingOutput(chatId, streamBuffer.substring(streamBuffer.length - 500));
+      }
+    }, 3000);
+
+    // Capture streaming output
+    if (child.stdout) {
+      child.stdout.on('data', (data: Buffer) => {
+        streamBuffer += data.toString();
+        // Keep buffer manageable
+        if (streamBuffer.length > 10000) {
+          streamBuffer = streamBuffer.substring(streamBuffer.length - 5000);
+        }
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on('data', (data: Buffer) => {
+        streamBuffer += data.toString();
+        if (streamBuffer.length > 10000) {
+          streamBuffer = streamBuffer.substring(streamBuffer.length - 5000);
+        }
+      });
+    }
+
+    // Clean up streaming interval on exit
+    child.on('exit', () => {
+      clearInterval(streamInterval);
+    });
+
     if (signal) {
-      signal.addEventListener('abort', () => { try { child.kill('SIGTERM'); } catch {} }, { once: true });
+      signal.addEventListener('abort', () => {
+        try { child.kill('SIGTERM'); } catch {}
+        clearInterval(streamInterval);
+      }, { once: true });
     }
   });
 }
 
-async function toolInstall(pkg: string, mgr = 'npm', signal?: AbortSignal | null): Promise<ToolResult> {
+async function toolInstall(
+  pkg: string,
+  mgr = 'npm',
+  signal: AbortSignal | null | undefined,
+  chatId: number,
+  sandbox: Sandbox
+): Promise<ToolResult> {
   const cmd = (mgr === 'pip' || mgr === 'python') ? `pip3 install ${pkg} 2>&1` : `npm install ${pkg} 2>&1`;
-  return toolRunShell(cmd, signal);
+  return toolRunShell(cmd, signal, chatId, sandbox);
 }
 
-function toolCreateFile(filePath: string, content: string): ToolResult {
+function toolCreateFile(filePath: string, content: string, workDir: string): ToolResult {
   try {
-    const fullPath = join(WORK_DIR, filePath);
+    const fullPath = join(workDir, filePath);
     if (!existsSync(dirname(fullPath))) mkdirSync(dirname(fullPath), { recursive: true });
     writeFileSync(fullPath, content, 'utf-8');
     return { success: true, output: `Created: ${filePath} (${content.length} chars)` };
   } catch (e: any) { return { success: false, output: e.message }; }
 }
 
-function toolCreateProject(name: string, desc: string, files: any): ToolResult {
+function toolCreateProject(name: string, desc: string, files: any, workDir: string): ToolResult {
   try {
-    const dir = join(WORK_DIR, name);
+    const dir = join(workDir, name);
     if (existsSync(dir)) rmSync(dir, { recursive: true });
     mkdirSync(dir, { recursive: true });
 
@@ -330,7 +399,7 @@ function toolCreateProject(name: string, desc: string, files: any): ToolResult {
   } catch (e: any) { return { success: false, output: e.message }; }
 }
 
-function toolPushGithub(repoName: string, desc = '', priv = false): ToolResult {
+function toolPushGithub(repoName: string, desc = '', priv = false, workDir: string): ToolResult {
   try {
     if (!GH_TOKEN) return { success: false, output: 'GH_PAT not configured' };
 
@@ -339,7 +408,7 @@ function toolPushGithub(repoName: string, desc = '', priv = false): ToolResult {
     if (cr.message?.includes('already exists')) console.log('[GitHub] Repo exists');
     else if (!cr.full_name) return { success: false, output: `GitHub: ${cr.message}` };
 
-    const dir = join(WORK_DIR, repoName);
+    const dir = join(workDir, repoName);
     if (!existsSync(dir)) return { success: false, output: `Project dir not found: ${repoName}` };
 
     const url = `https://${GH_TOKEN}@github.com/${GH_USERNAME}/${repoName}.git`;
@@ -348,21 +417,21 @@ function toolPushGithub(repoName: string, desc = '', priv = false): ToolResult {
   } catch (e: any) { return { success: false, output: e.message?.substring(0, 500) }; }
 }
 
-async function toolSendFile(fp: string, caption: string, chatId: number): Promise<ToolResult> {
+async function toolSendFile(fp: string, caption: string, chatId: number, workDir: string): Promise<ToolResult> {
   try {
-    const fullPath = join(WORK_DIR, fp);
+    const fullPath = join(workDir, fp);
     if (!existsSync(fullPath)) return { success: false, output: `Not found: ${fp}` };
     await sendDocumentBuffer(chatId, Buffer.from(readFileSync(fullPath)), fp.split('/').pop() || 'file', caption);
     return { success: true, output: `Sent: ${fp}` };
   } catch (e: any) { return { success: false, output: e.message }; }
 }
 
-async function toolSendProjectZip(name: string, caption: string, chatId: number): Promise<ToolResult> {
+async function toolSendProjectZip(name: string, caption: string, chatId: number, workDir: string): Promise<ToolResult> {
   try {
-    const dir = join(WORK_DIR, name);
+    const dir = join(workDir, name);
     if (!existsSync(dir)) return { success: false, output: `Not found: ${name}` };
-    const zp = join(WORK_DIR, `${name}.zip`);
-    execSync(`cd "${WORK_DIR}" && zip -r "${name}.zip" "${name}/"`, { encoding: 'utf-8', timeout: 30000 });
+    const zp = join(workDir, `${name}.zip`);
+    execSync(`cd "${workDir}" && zip -r "${name}.zip" "${name}/"`, { encoding: 'utf-8', timeout: 30000 });
     await sendDocumentBuffer(chatId, Buffer.from(readFileSync(zp)), `${name}.zip`, caption || name);
     try { rmSync(zp); } catch {}
     return { success: true, output: `ZIP sent: ${name}.zip` };
@@ -377,44 +446,51 @@ async function toolWebSearch(q: string): Promise<ToolResult> {
   return { success: true, output: o, data: r };
 }
 
-async function toolGenerateImage(prompt: string, chatId: number): Promise<ToolResult> {
+async function toolGenerateImage(prompt: string, chatId: number, workDir: string): Promise<ToolResult> {
   const b64 = await generateImage(prompt);
   if (b64) {
     const buf = Buffer.from(b64, 'base64');
     const fn = `img_${Date.now()}.png`;
     await sendPhotoBuffer(chatId, buf, fn, prompt);
-    writeFileSync(join(WORK_DIR, fn), buf);
-    return { success: true, output: `Image generated: ${fn}`, data: { filePath: join(WORK_DIR, fn) } };
+    writeFileSync(join(workDir, fn), buf);
+    return { success: true, output: `Image generated: ${fn}`, data: { filePath: join(workDir, fn) } };
   }
   return { success: false, output: 'Failed to generate image' };
 }
 
-async function toolRunCode(lang: string, code: string, signal?: AbortSignal | null): Promise<ToolResult> {
-  const sp = join(WORK_DIR, `_run_${Date.now()}`);
-  if (!existsSync(WORK_DIR)) mkdirSync(WORK_DIR, { recursive: true });
+async function toolRunCode(
+  lang: string,
+  code: string,
+  signal: AbortSignal | null | undefined,
+  chatId: number,
+  sandbox: Sandbox,
+  workDir: string
+): Promise<ToolResult> {
+  const sp = join(workDir, `_run_${Date.now()}`);
+  if (!existsSync(workDir)) mkdirSync(workDir, { recursive: true });
   const l = lang.toLowerCase();
   let cmd: string;
   if (l === 'javascript' || l === 'js') { writeFileSync(sp + '.js', code, 'utf-8'); cmd = `node "${sp}.js"`; }
   else if (l === 'python' || l === 'py') { writeFileSync(sp + '.py', code, 'utf-8'); cmd = `python3 "${sp}.py"`; }
   else if (l === 'bash' || l === 'sh') { writeFileSync(sp + '.sh', code, 'utf-8'); cmd = `bash "${sp}.sh"`; }
   else return { success: false, output: `Unsupported language: ${lang}` };
-  const r = await toolRunShell(cmd, signal);
+  const r = await toolRunShell(cmd, signal, chatId, sandbox);
   try { rmSync(sp + '.*'); } catch {}
   return r;
 }
 
-function toolReadFile(fp: string): ToolResult {
+function toolReadFile(fp: string, workDir: string): ToolResult {
   try {
-    const p = join(WORK_DIR, fp);
+    const p = join(workDir, fp);
     if (!existsSync(p)) return { success: false, output: `Not found: ${fp}` };
     const content = readFileSync(p, 'utf-8');
     return { success: true, output: content.substring(0, 8000), data: { content } };
   } catch (e: any) { return { success: false, output: e.message }; }
 }
 
-function toolListFiles(project?: string): ToolResult {
+function toolListFiles(project?: string, workDir?: string): ToolResult {
   try {
-    const d = project ? join(WORK_DIR, project) : WORK_DIR;
+    const d = project && workDir ? join(workDir, project) : (workDir || process.cwd());
     if (!existsSync(d)) return { success: false, output: 'Directory not found' };
     function ls(dir: string, pfx = ''): string[] {
       const r: string[] = [];
@@ -430,9 +506,9 @@ function toolListFiles(project?: string): ToolResult {
   } catch (e: any) { return { success: false, output: e.message }; }
 }
 
-function toolEditFile(fp: string, old: string, rep: string): ToolResult {
+function toolEditFile(fp: string, old: string, rep: string, workDir: string): ToolResult {
   try {
-    const p = join(WORK_DIR, fp);
+    const p = join(workDir, fp);
     if (!existsSync(p)) return { success: false, output: `Not found: ${fp}` };
     let c = readFileSync(p, 'utf-8');
     if (!c.includes(old)) return { success: false, output: `Text not found in ${fp}` };
@@ -444,7 +520,7 @@ function toolEditFile(fp: string, old: string, rep: string): ToolResult {
 // ─── System Prompt ─────────────────────────────────────────
 
 export function getAgentSystemPrompt(): string {
-  return `أنت Z.ai Agent — وكيل ذكي يعمل على بيئة لينكس. يمكنك بناء تطبيقات كاملة، إنشاء مشاريع، كتابة وتنفيذ كود، بحث الويب، إنشاء صور بالذكاء الاصطناعي، وأكثر. أنت تعمل مثل وضع Agent في chat.z.ai.
+  return `أنت Z.ai Agent v18.0 — وكيل ذكي يعمل على بيئة لينكس معزولة. يمكنك بناء تطبيقات كاملة، إنشاء مشاريع، كتابة وتنفيذ كود، بحث الويب، إنشاء صور بالذكاء الاصطناعي، وأكثر. أنت تعمل مثل وضع Agent في chat.z.ai.
 
 لديك 13 أداة متاحة يمكنك استخدامها. استخدم الأدوات المناسبة لتنفيذ طلبات المستخدم.
 
@@ -458,5 +534,6 @@ export function getAgentSystemPrompt(): string {
 7. استخدم run_shell لأوامر النظام (git, npm, pip, ls, cat, etc.)
 8. ابحث في الويب عند الحاجة لمعلومات حديثة
 9. عند إنشاء ملفات، اكتب المحتوى الكامل - لا تضع تعليقات مثل "..."
-10. دائماً اعرض ما تفعله بالتفصيل قبل استخدام الأداة`;
+10. دائماً اعرض ما تفعله بالتفصيل قبل استخدام الأداة
+11. كل جلسة لها مساحة عمل معزولة خاصة بها`;
 }

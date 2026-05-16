@@ -1,6 +1,6 @@
 /**
- * Telegram API Helper v17.0
- * Rate-limited, retry-capable, with media support
+ * Telegram API Helper v18.0
+ * Rate-limited, retry-capable, with media and file browser support
  */
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
@@ -127,6 +127,81 @@ export function escapeHtml(t: string): string {
 
 export function truncateText(t: string, max = 4000): string {
   return t.length <= max ? t : t.substring(0, max) + '\n\n... (trimmed)';
+}
+
+// ─── File Browser Helpers ──────────────────────────────────
+
+export interface FileEntry {
+  name: string;
+  isDirectory: boolean;
+  size?: number;
+}
+
+/**
+ * Build inline keyboard for a directory listing.
+ * @param entries - File/directory entries
+ * @param currentPath - Current directory path (relative to workspace)
+ * @returns Inline keyboard buttons
+ */
+export function buildFileBrowserKeyboard(
+  entries: FileEntry[],
+  currentPath: string
+): InlineKeyboardButton[][] {
+  const buttons: InlineKeyboardButton[][] = [];
+
+  // "Go up" button if not at root
+  if (currentPath) {
+    const parentPath = currentPath.split('/').slice(0, -1).join('/');
+    buttons.push([{ text: '📂 ..', callback_data: `browse_dir_${parentPath}` }]);
+  }
+
+  // Sort: directories first, then files
+  const sorted = [...entries].sort((a, b) => {
+    if (a.isDirectory && !b.isDirectory) return -1;
+    if (!a.isDirectory && b.isDirectory) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  // Group into rows of 2
+  const dirEntries = sorted.filter(e => e.isDirectory);
+  const fileEntries = sorted.filter(e => !e.isDirectory);
+
+  // Directories (one per row for better UX)
+  for (const entry of dirEntries) {
+    const fullPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+    buttons.push([{
+      text: `📂 ${entry.name}`,
+      callback_data: `browse_dir_${fullPath}`,
+    }]);
+  }
+
+  // Files (two per row)
+  for (let i = 0; i < fileEntries.length; i += 2) {
+    const row: InlineKeyboardButton[] = [];
+    const entry1 = fileEntries[i];
+    const fullPath1 = currentPath ? `${currentPath}/${entry1.name}` : entry1.name;
+    const sizeStr1 = entry1.size ? ` (${(entry1.size / 1024).toFixed(1)}KB)` : '';
+    row.push({
+      text: `📄 ${entry1.name}${sizeStr1}`,
+      callback_data: `browse_file_${fullPath1}`,
+    });
+
+    if (i + 1 < fileEntries.length) {
+      const entry2 = fileEntries[i + 1];
+      const fullPath2 = currentPath ? `${currentPath}/${entry2.name}` : entry2.name;
+      const sizeStr2 = entry2.size ? ` (${(entry2.size / 1024).toFixed(1)}KB)` : '';
+      row.push({
+        text: `📄 ${entry2.name}${sizeStr2}`,
+        callback_data: `browse_file_${fullPath2}`,
+      });
+    }
+    buttons.push(row);
+  }
+
+  // Back button
+  buttons.push([{ text: '🔙 رجوع', callback_data: 'browse_root' }]);
+
+  return buttons;
 }
 
 // ─── Types ────────────────────────────────────────────────

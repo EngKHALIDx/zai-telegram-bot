@@ -1,7 +1,7 @@
 {
   "name": "zai-telegram-agent",
-  "version": "17.0.0",
-  "description": "Z.ai Telegram Agent v17.0 - Full agent with native tool calling",
+  "version": "18.0.0",
+  "description": "Z.ai Telegram Agent v18.0 - Production-ready agent with isolated sandboxes, concurrency limits, streaming, and file browser",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
