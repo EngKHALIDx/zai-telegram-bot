@@ -22,33 +22,43 @@ jobs:
       - name: Create workspace dirs
         run: mkdir -p workspace data
 
-      - name: Restore workspace
+      - name: Restore workspace artifact
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: agent-workspace
-          path: .
+          name: agent-workspace-v16
+          path: workspace/
 
-      - name: Run Agent
+      - name: Create Z.ai config
+        run: |
+          cat > .z-ai-config << 'CONFIG'
+          {
+            "baseUrl": "${{ secrets.ZAI_BASE_URL }}",
+            "apiKey": "${{ secrets.ZAI_API_KEY }}",
+            "chatId": "${{ secrets.ZAI_CHAT_ID }}",
+            "token": "${{ secrets.ZAI_TOKEN }}",
+            "userId": "${{ secrets.ZAI_USER_ID }}"
+          }
+          CONFIG
+
+      - name: Run Agent v16.0
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+          ALLOWED_USERNAMES: ${{ secrets.ALLOWED_USERNAMES }}
+          DEFAULT_MODEL: glm-4-flash
           ZAI_BASE_URL: ${{ secrets.ZAI_BASE_URL }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           ZAI_CHAT_ID: ${{ secrets.ZAI_CHAT_ID }}
           ZAI_TOKEN: ${{ secrets.ZAI_TOKEN }}
           ZAI_USER_ID: ${{ secrets.ZAI_USER_ID }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GH_USERNAME: ${{ secrets.GH_USERNAME }}
-          ALLOWED_USERNAMES: ${{ secrets.ALLOWED_USERNAMES }}
-          DEFAULT_MODEL: glm-5.1
         run: npx tsx src/index.ts
 
-      - name: Save workspace
+      - name: Save workspace artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: agent-workspace
-          path: |
-            workspace/
-            data/
+          name: agent-workspace-v16
+          path: workspace/
           retention-days: 90

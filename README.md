@@ -1,65 +1,53 @@
-# 🤖 Z.ai Telegram Agent v15.0
+# Z.ai Telegram Agent v16.0
 
-Real-time Agent Mode Telegram Bot - Works like chat.z.ai agent!
+🤖 وكيل ذكي يعمل على تيليجرام مثل وضع Agent في chat.z.ai
 
-## ✨ Features
+## ✨ المميزات
 
-- 🤖 **Agent Mode Only** - Like chat.z.ai Agent, not chat
-- ⏳ **Real-time Display** - Shows every step as it happens (tool, input, output, duration)
-- ⏹️ **Stop Button** - Stop any operation instantly
-- ⏱️ **Live Timer** - Shows elapsed time, step count, progress
-- 🔄 **Iterative Tool Calling** - AI calls tools, sees results, continues until done
-- 📝 **Session Based** - Each task is a clean session
-- 🌟 **6 AI Models** - GLM-5.1, Plus, Vision, Flash, etc.
-- 🔧 **13 Tools** - Shell, code execution, web search, image gen, GitHub push, etc.
-- 👁️ **Vision** - Analyze images
-- 🔒 **User Auth** - Restrict access
-- ⏰ **24/7** - GitHub Actions
+- 🔧 **13 أداة متاحة**: تنفيذ أوامر Shell، إنشاء ملفات، تثبيت حزم، بحث الويب، إنشاء صور، وأكثر
+- 🔄 **Agent Mode**: حلقة أدوات تكرارية مثل chat.z.ai - البوت يفكر وينفذ خطوة بخطوة
+- ⏱️ **عرض لحظي**: يعرض العمليات الجارية بالزمن الحقيقي مع عداد الخطوات
+- ⏹️ **زر الإيقاف**: إيقاف أي عملية جارية فوراً
+- 🧠 **نماذج متعددة**: GLM-4 Flash, GLM-4 Plus, GLM-5.1 وأكثر
+- 🖼️ **تحليل الصور**: إرسال صور وتحليلها بالذكاء الاصطناعي
+- 🚀 **رفع GitHub**: إنشاء مشاريع ورفعها مباشرة على GitHub
 
-## 📋 Commands
-
-- `/start` / `/help` - Show help
-- `/new` - New session (clean)
-- `/model` - Choose model
-- `/think` - Toggle deep thinking
-- `/stop` - Stop current operation
-- `/status` - Show running operation
-- `/reset` - Reset everything
-
-Just send any message and the agent starts working!
-
-## 🚀 Setup
+## 🚀 التشغيل
 
 ```bash
-git clone https://github.com/EngKHALIDx/zai-telegram-bot.git
-cd zai-telegram-bot
+# تثبيت الحزم
 npm install
-cp .env.example .env
-# Edit .env
-npm start
+
+# تشغيل البوت
+TELEGRAM_BOT_TOKEN=xxx ZAI_BASE_URL=xxx ZAI_API_KEY=xxx npx tsx src/index.ts
 ```
 
-## 📁 Structure
+## 📋 الأوامر
 
-```
-src/
-├── index.ts       # Main: polling, commands, agent loop
-├── tools.ts       # 13 tools with real-time display
-├── operations.ts  # Real-time operation display system
-├── zai.ts         # Z.ai API client
-├── telegram.ts    # Telegram API with edit support
-```
+| الأمر | الوصف |
+|-------|-------|
+| `/start` | عرض القائمة الرئيسية |
+| `/new` | جلسة جديدة |
+| `/model` | اختيار النموذج |
+| `/think` | تفعيل/تعطيل التفكير العميق |
+| `/stop` | إيقاف العملية الحالية |
+| `/status` | حالة النظام |
+| `/reset` | إعادة تعيين كل شيء |
 
-## 🎯 How It Works
+## 🔧 الأدوات المتاحة
 
-1. User sends a request
-2. Bot calls Z.ai API with system prompt + tools
-3. If AI wants to use a tool → parse & execute
-4. Show each step in real-time (tool name, input, output, duration)
-5. Send results back to AI for next iteration
-6. Repeat until AI gives final answer
-7. All with a ⏹️ Stop button!
-
-## License
-
-MIT
+| الأداة | الوصف |
+|--------|-------|
+| `run_shell` | تنفيذ أمر Shell |
+| `install_package` | تثبيت حزمة npm/pip |
+| `create_file` | إنشاء ملف |
+| `create_project` | إنشاء مشروع كامل |
+| `read_file` | قراءة ملف |
+| `edit_file` | تعديل ملف |
+| `list_files` | عرض الملفات |
+| `run_code` | تنفيذ كود JS/Python/Bash |
+| `web_search` | بحث في الويب |
+| `generate_image` | إنشاء صورة بالذكاء الاصطناعي |
+| `send_file` | إرسال ملف عبر تيليجرام |
+| `send_project_zip` | إرسال مشروع كـ ZIP |
+| `push_github` | رفع مشروع على GitHub |

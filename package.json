@@ -1,7 +1,7 @@
 {
   "name": "zai-telegram-agent",
-  "version": "15.0.0",
-  "description": "Z.ai Telegram Agent - Real-time agent mode like chat.z.ai",
+  "version": "16.0.0",
+  "description": "Z.ai Telegram Agent v16.0 - Full agent mode like chat.z.ai",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
