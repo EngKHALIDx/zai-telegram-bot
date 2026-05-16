@@ -113,7 +113,7 @@ export async function getFile(fileId: string): Promise<{ file_path?: string } | 
 
 export function getFileUrl(fp: string): string { return `https://api.telegram.org/file/bot${BOT_TOKEN}/${fp}`; }
 
-export async function getUpdates(offset = 0, timeout = 5): Promise<any> {
+export async function getUpdates(offset = 0, timeout = 0): Promise<any> {
   return apiCall('getUpdates', { offset, timeout, allowed_updates: ['message', 'callback_query'] });
 }
 
