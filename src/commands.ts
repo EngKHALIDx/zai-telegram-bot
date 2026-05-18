@@ -59,9 +59,9 @@ registerCommand({
   description: 'رسالة الترحيب والقائمة الرئيسية',
   handler: async (ctx) => {
     await sendMessage(ctx.chatId, `
-🤖 <b>Z.ai Agent v18.1</b> — 🐧 بيئة لينكس
+🤖 <b>Z.ai Agent v18.2</b> — 🐧 بيئة لينكس | ☁️ GitHub Actions
 
-أنا وكيل ذكي يعمل في بيئة لينكس حقيقية!
+أنا وكيل ذكي يعمل في بيئة لينكس حقيقية على GitHub Actions!
 أستطيع تنفيذ أوامر Bash، بناء تطبيقات، كتابة كود، بحث الويب، وأكثر.
 
 🐧 <b>بيئة لينكس:</b>
@@ -69,6 +69,11 @@ registerCommand({
 • أدوات: python3, node, npm, pip3, git, curl, wget, gcc...
 • تثبيت حزم: apt-get, npm, pip3
 • كل جلسة لها مساحة عمل معزولة
+
+☁️ <b>التشغيل:</b>
+• يعمل على GitHub Actions 24/7
+• إعادة تشغيل تلقائية عبر Cron
+• مساحة عمل مستمرة بين التشغيلات
 
 🏗️ <b>ما يمكنني فعله:</b>
 • بناء مواقع وتطبيقات كاملة
@@ -85,6 +90,7 @@ registerCommand({
 /stop — إيقاف العملية الحالية
 /status — حالة النظام
 /linux — معلومات بيئة لينكس
+/servers — معلومات السيرفر
 /files — تصفح ملفات المساحة
 /sandboxes — عرض البيئات المعزولة
 /processes — العمليات الجارية
@@ -106,7 +112,10 @@ registerCommand({
             { text: '🐧 لينكس', callback_data: 'linux_info' },
           ],
           [
+            { text: '☁️ السيرفر', callback_data: 'server_info' },
             { text: '📂 الملفات', callback_data: 'browse_root' },
+          ],
+          [
             { text: '📜 السجل', callback_data: 'history' },
           ],
         ],
@@ -136,8 +145,18 @@ registerCommand({
     const { getActiveCount, getMaxSandboxes } = await import('./sandbox.js');
     const { getProcessCount } = await import('./process-manager.js');
 
+    const isGH = !!process.env.GITHUB_ACTIONS;
+    const runNum = process.env.GITHUB_RUN_NUMBER || '-';
+    const runId = process.env.GITHUB_RUN_ID || '-';
+    const workflow = process.env.GITHUB_WORKFLOW || '-';
+
     let text = `📊 <b>حالة النظام</b>\n\n`;
     text += `🟢 البوت: يعمل\n`;
+    text += `☁️ السيرفر: ${isGH ? `GitHub Actions` : 'محلي (تجريبي)'}\n`;
+    if (isGH) {
+      text += `📋 Workflow: <code>${escapeHtml(workflow)}</code>\n`;
+      text += `🔢 Run: #${runNum} (${runId.substring(0, 8)})\n`;
+    }
     text += `⏱️ مدة التشغيل: ${uptimeStr}\n`;
     text += `🤖 النموذج: <code>${sandbox?.model || 'غير محدد'}</code>\n`;
     text += `🧠 التفكير: ${sandbox?.thinking ? '✅ مفعل' : '❌ معطل'}\n`;
@@ -507,6 +526,84 @@ registerCommand({
         inline_keyboard: [
           [{ text: '🔄 تحديث', callback_data: 'linux_info' }],
           [{ text: '🆕 مهمة جديدة', callback_data: 'new_agent' }],
+        ],
+      },
+    });
+  },
+});
+
+registerCommand({
+  name: 'servers',
+  description: 'معلومات السيرفر (GitHub Actions)',
+  handler: async (ctx) => {
+    const { execSync } = await import('child_process');
+
+    const isGH = !!process.env.GITHUB_ACTIONS;
+    const runNum = process.env.GITHUB_RUN_NUMBER || '-';
+    const runId = process.env.GITHUB_RUN_ID || '-';
+    const workflow = process.env.GITHUB_WORKFLOW || '-';
+    const actor = process.env.GITHUB_ACTOR || '-';
+    const repository = process.env.GITHUB_REPOSITORY || '-';
+    const ref = process.env.GITHUB_REF || '-';
+    const sha = process.env.GITHUB_SHA ? process.env.GITHUB_SHA.substring(0, 7) : '-';
+    const runnerOS = process.env.RUNNER_OS || process.env.OS || 'Linux';
+    const runnerArch = process.env.RUNNER_ARCH || 'X64';
+
+    let text = `☁️ <b>معلومات السيرفر</b>\n\n`;
+
+    text += `🖥️ <b>نوع التشغيل:</b> ${isGH ? 'GitHub Actions ☁️' : 'محلي (تجريبي) 🏠'}\n\n`;
+
+    if (isGH) {
+      text += `📋 <b>Workflow:</b> <code>${escapeHtml(workflow)}</code>\n`;
+      text += `🔢 <b>Run:</b> #${runNum}\n`;
+      text += `🆔 <b>Run ID:</b> <code>${runId}</code>\n`;
+      text += `👤 <b>Actor:</b> <code>${escapeHtml(actor)}</code>\n`;
+      text += `📁 <b>Repository:</b> <code>${escapeHtml(repository)}</code>\n`;
+      text += `🌿 <b>Branch:</b> <code>${escapeHtml(ref.replace('refs/heads/', ''))}</code>\n`;
+      text += `📝 <b>Commit:</b> <code>${sha}</code>\n`;
+      text += `💻 <b>OS:</b> ${runnerOS} (${runnerArch})\n`;
+    } else {
+      text += `⚠️ البوت لا يعمل على GitHub Actions حالياً\n`;
+      text += `يعمل في وضع تجريبي محلي\n`;
+    }
+
+    // System info
+    text += `\n📊 <b>معلومات النظام:</b>\n`;
+    try {
+      const osInfo = execSync('cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d \'"\'', { encoding: 'utf-8' }).trim();
+      text += `💻 النظام: ${escapeHtml(osInfo)}\n`;
+    } catch { text += `💻 النظام: Linux\n`; }
+    try {
+      const kernel = execSync('uname -r', { encoding: 'utf-8' }).trim();
+      text += `🔬 النواة: ${kernel}\n`;
+    } catch {}
+    try {
+      const cpus = execSync('nproc', { encoding: 'utf-8' }).trim();
+      text += `⚡ الأنوية: ${cpus}\n`;
+    } catch {}
+    try {
+      const mem = execSync('free -h --si 2>/dev/null | grep Mem | awk \'{print $2}\'', { encoding: 'utf-8' }).trim();
+      text += `💾 الذاكرة: ${mem}\n`;
+    } catch {}
+    try {
+      const disk = execSync('df -h / --output=size,avail 2>/dev/null | tail -1', { encoding: 'utf-8' }).trim();
+      text += `💿 القرص: ${disk.replace(/\s+/, ' (متاح: ')} )\n`;
+    } catch {}
+
+    // Node info
+    try {
+      const nodeVer = execSync('node --version', { encoding: 'utf-8' }).trim();
+      text += `🟢 Node.js: ${nodeVer}\n`;
+    } catch {}
+
+    text += `\n⏱️ <b>مدة التشغيل الحالية:</b> ${Math.floor((Date.now() - ctx.startTime) / 60000)} دقيقة\n`;
+
+    await sendMessage(ctx.chatId, text, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔄 تحديث', callback_data: 'server_info' }],
+          [{ text: '📊 حالة النظام', callback_data: 'status' }],
+          [{ text: '🐧 لينكس', callback_data: 'linux_info' }],
         ],
       },
     });

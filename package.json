@@ -1,7 +1,7 @@
 {
   "name": "zai-telegram-agent",
-  "version": "18.1.0",
-  "description": "Z.ai Telegram Agent v18.1 - Linux environment, bash shell execution, apt/npm/pip install, isolated sandboxes, streaming",
+  "version": "18.2.0",
+  "description": "Z.ai Telegram Agent v18.2 - GitHub Actions only, Linux environment, bash shell execution, apt/npm/pip install, isolated sandboxes, streaming",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {

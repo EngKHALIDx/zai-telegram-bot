@@ -1,6 +1,7 @@
 /**
- * Z.ai Telegram Agent v18.1 — Linux Environment
+ * Z.ai Telegram Agent v18.2 — GitHub Actions Only
  * Executes all commands in real Linux bash shell environment
+ * Runs exclusively on GitHub Actions with auto-restart via cron
  * Production-ready Agent bot with isolated sandboxes, concurrency limits,
  * real-time operations display, file browser, process tracking, streaming
  */
@@ -30,6 +31,11 @@ import { join } from 'path';
 
 const ALLOWED = (process.env.ALLOWED_USERNAMES || '').split(',').map(u => u.trim().replace('@', '').toLowerCase()).filter(u => u);
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'glm-4-flash';
+const IS_GITHUB_ACTIONS = !!process.env.GITHUB_ACTIONS;
+const RUNNER_OS = process.env.RUNNER_OS || 'Linux';
+const GITHUB_RUN_ID = process.env.GITHUB_RUN_ID || 'local';
+const GITHUB_RUN_NUMBER = process.env.GITHUB_RUN_NUMBER || '0';
+const GITHUB_WORKFLOW = process.env.GITHUB_WORKFLOW || 'unknown';
 
 let lastUpdateId = 0;
 let isPolling = false;
@@ -433,6 +439,19 @@ async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
         });
       }
     }
+    else if (data === 'server_info') {
+      const cmd = getCommand('servers');
+      if (cmd) {
+        await cmd.handler({
+          chatId,
+          sandbox: getActiveSandbox(chatId),
+          operation: getOperation(chatId),
+          isRunning: isRunning(chatId),
+          startTime,
+          args: '',
+        });
+      }
+    }
     else if (data === 'sandboxes') {
       const cmd = getCommand('sandboxes');
       if (cmd) {
@@ -581,6 +600,8 @@ async function handleMessage(msg: TelegramMessage): Promise<void> {
 // ─── Polling ──────────────────────────────────────────────
 
 let pollRetryCount = 0;
+let conflictCount = 0;
+const MAX_CONFLICTS = 10; // After this many conflicts, assume another runner exists and back off
 
 async function poll(): Promise<void> {
   if (isPolling) return;
@@ -590,8 +611,14 @@ async function poll(): Promise<void> {
     if (!result?.ok) {
       const desc = result?.description || 'Unknown';
       if (desc.includes('Conflict')) {
+        conflictCount++;
         pollRetryCount++;
-        if (pollRetryCount > 5) {
+        if (conflictCount > MAX_CONFLICTS) {
+          // Another instance is running — back off significantly
+          console.warn(`[Poll] ${conflictCount} conflicts detected. Another runner is active. Backing off 60s...`);
+          await new Promise(r => setTimeout(r, 60000));
+          conflictCount = 0; // Reset after backoff to check again
+        } else if (pollRetryCount > 5) {
           console.warn('[Poll] Conflict persists, waiting 30s...');
           await new Promise(r => setTimeout(r, 30000));
           pollRetryCount = 0;
@@ -605,7 +632,9 @@ async function poll(): Promise<void> {
       isPolling = false;
       return;
     }
+    // Successful poll resets counters
     pollRetryCount = 0;
+    conflictCount = 0;
     const updates: TelegramUpdate[] = result.result || [];
     for (const u of updates) {
       if (u.update_id > lastUpdateId) lastUpdateId = u.update_id;
@@ -632,11 +661,14 @@ function logHealth(): void {
   const up = Math.floor((Date.now() - startTime) / 1000);
   const mem = process.memoryUsage();
   const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
+  const serverInfo = IS_GITHUB_ACTIONS ? `GH Actions #${GITHUB_RUN_NUMBER}` : 'Local';
   console.log(
     `[Health] ${new Date().toISOString()} | ` +
+    `Server: ${serverInfo} | ` +
     `Up: ${Math.floor(up / 3600)}h ${Math.floor((up % 3600) / 60)}m | ` +
     `Sandboxes: ${getActiveCount()}/${getMaxSandboxes()} | ` +
     `Processes: ${getAllProcesses().length} | ` +
+    `Conflicts: ${conflictCount} | ` +
     `Mem: RSS=${mb(mem.rss)}MB Heap=${mb(mem.heapUsed)}/${mb(mem.heapTotal)}MB`
   );
 }
@@ -668,7 +700,9 @@ function gracefulShutdown(signal: string): void {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
-  console.log('[Bot] Z.ai Agent v18.1 (Linux Environment) starting...');
+  console.log(`[Bot] Z.ai Agent v18.2 (GitHub Actions Only) starting...`);
+  console.log(`[Bot] Server: ${IS_GITHUB_ACTIONS ? `GitHub Actions #${GITHUB_RUN_NUMBER} (Run: ${GITHUB_RUN_ID})` : 'Local (dev only)'}`);
+  console.log(`[Bot] OS: ${RUNNER_OS}`);
   console.log(`[Bot] Max sandboxes: ${getMaxSandboxes()}`);
   console.log(`[Bot] Allowed users: ${ALLOWED.length > 0 ? ALLOWED.join(', ') : 'Everyone'}`);
 
@@ -692,8 +726,11 @@ async function main() {
   // Start idle cleanup
   startIdleCleanup();
 
-  // Poll loop - short polling with 1.5s interval
-  const loop = () => poll().finally(() => setTimeout(loop, 1500));
+  // Poll loop — adaptive interval based on environment
+  // GitHub Actions: 1.5s (fast response)
+  // With conflicts: 3s (reduce API pressure)
+  const baseInterval = IS_GITHUB_ACTIONS ? 1500 : 2000;
+  const loop = () => poll().finally(() => setTimeout(loop, conflictCount > 3 ? 3000 : baseInterval));
   loop();
 
   // Health monitoring every 60s
@@ -705,6 +742,13 @@ async function main() {
   // Set up command list for Telegram (optional)
   const commands = getAllCommands();
   console.log(`[Bot] Registered ${commands.length} commands: ${commands.map(c => `/${c.name}`).join(', ')}`);
+
+  // GitHub Actions: Send startup notification to allowed user
+  if (IS_GITHUB_ACTIONS && ALLOWED.length > 0) {
+    // Find the first allowed user's chat — we'll send to a known admin chat
+    // For now, just log it
+    console.log(`[Bot] Running on GitHub Actions — 24/7 mode active`);
+  }
 }
 
 // ─── Process Event Handlers ────────────────────────────────

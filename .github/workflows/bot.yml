@@ -3,12 +3,16 @@ name: Z.ai Agent 24/7
 on:
   workflow_dispatch:
   schedule:
+    # Run every 5 hours — ensures continuous 24/7 coverage
+    # Each job runs for up to 5.5 hours (330 min timeout)
+    # New job starts before old one ends → no gaps
     - cron: '0 */5 * * *'
 
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 330  # 5.5 hours max per job
+
     steps:
       - uses: actions/checkout@v4
 
@@ -26,11 +30,12 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: agent-workspace-v17
+          name: agent-workspace-v18
           path: workspace/
 
-      - name: Run Agent v17.0
+      - name: Run Agent v18.2 (GitHub Actions)
         env:
+          GITHUB_ACTIONS: 'true'
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
           GH_USERNAME: ${{ secrets.GH_USERNAME }}
@@ -41,12 +46,15 @@ jobs:
           ZAI_CHAT_ID: ${{ secrets.ZAI_CHAT_ID }}
           ZAI_USER_ID: ${{ secrets.ZAI_USER_ID }}
           ZAI_TOKEN: ${{ secrets.ZAI_TOKEN }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_BASE_URL: ${{ secrets.OPENCODE_BASE_URL || 'https://opencode.ai/api/v1' }}
+          MAX_SANDBOXES: ${{ secrets.MAX_SANDBOXES || '3' }}
         run: npx tsx src/index.ts
 
       - name: Save workspace artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: agent-workspace-v17
+          name: agent-workspace-v18
           path: workspace/
           retention-days: 90

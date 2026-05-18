@@ -1,7 +1,8 @@
 /**
- * Sandbox & Session Management v18.1
+ * Sandbox & Session Management v18.2
  * Isolated Agent sessions with concurrency limits, idle cleanup, and per-session workspaces
  * Linux environment initialization for each sandbox
+ * Optimized for GitHub Actions runtime
  */
 import { mkdirSync, rmSync, existsSync, writeFileSync, appendFileSync } from 'fs';
 import { join } from 'path';
