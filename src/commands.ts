@@ -1,12 +1,12 @@
 /**
- * Command Registry v18.0
- * Extensible command handler system
+ * Command Registry v19.0
+ * Extensible command handler system with full model catalog
  * All user-facing text is in ARABIC
  */
 import { sendMessage, escapeHtml } from './telegram.js';
 import type { Sandbox } from './sandbox.js';
 import type { ActiveOperation } from './operations.js';
-import type { TrackedProcess } from './process-manager.js';
+import { MODELS, getModel, getModelOrDefault, getModelsByCategory, getFreeModels, getCategoryLabel, MODEL_CATEGORIES, type ModelDefinition } from './models.js';
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -58,8 +58,10 @@ registerCommand({
   name: 'start',
   description: 'رسالة الترحيب والقائمة الرئيسية',
   handler: async (ctx) => {
+    const freeCount = getFreeModels().length;
+    const totalModels = MODELS.length;
     await sendMessage(ctx.chatId, `
-🤖 <b>Z.ai Agent v18.2</b> — 🐧 بيئة لينكس | ☁️ GitHub Actions
+🤖 <b>Z.ai Agent v19.0</b> — 🐧 بيئة لينكس | ☁️ GitHub Actions
 
 أنا وكيل ذكي يعمل في بيئة لينكس حقيقية على GitHub Actions!
 أستطيع تنفيذ أوامر Bash، بناء تطبيقات، كتابة كود، بحث الويب، وأكثر.
@@ -71,9 +73,16 @@ registerCommand({
 • كل جلسة لها مساحة عمل معزولة
 
 ☁️ <b>التشغيل:</b>
-• يعمل على GitHub Actions 24/7
-• إعادة تشغيل تلقائية عبر Cron
-• مساحة عمل مستمرة بين التشغيلات
+• يعمل على GitHub Actions 24/7 فقط
+• إعادة تشغيل تلقائية عبر Cron كل 5 ساعات
+• مساحة عمل مستقرة بين التشغيلات (Artifacts)
+
+🤖 <b>النماذج:</b> ${totalModels} نموذج (${freeCount} مجاني)
+• 🆓 OpenCode: big-pickle, deepseek-v4-flash, minimax-m2.5, nemotron-3
+• 🆓 ZhipuAI: glm-4-flash, glm-4.5-flash, glm-4.7-flash
+• 💎 متقدم: glm-5.1, glm-5, glm-4.7, glm-4-plus
+• 🖼️ بصري: glm-4v-flash, glm-4v-plus, glm-5v-turbo
+• 🧠 استدلال: glm-z1-air, glm-z1-flash, glm-4.5
 
 🏗️ <b>ما يمكنني فعله:</b>
 • بناء مواقع وتطبيقات كاملة
@@ -85,7 +94,8 @@ registerCommand({
 
 📋 <b>الأوامر:</b>
 /new — مهمة جديدة (جلسة معزولة)
-/model — اختيار النموذج
+/model — اختيار النموذج (${totalModels} نموذج)
+/providers — عرض المزودين
 /think — التفكير العميق
 /stop — إيقاف العملية الحالية
 /status — حالة النظام
@@ -116,6 +126,7 @@ registerCommand({
             { text: '📂 الملفات', callback_data: 'browse_root' },
           ],
           [
+            { text: '📡 المزودين', callback_data: 'providers' },
             { text: '📜 السجل', callback_data: 'history' },
           ],
         ],
@@ -159,10 +170,19 @@ registerCommand({
     }
     text += `⏱️ مدة التشغيل: ${uptimeStr}\n`;
     text += `🤖 النموذج: <code>${sandbox?.model || 'غير محدد'}</code>\n`;
+
+    // Show model provider
+    const modelDef = getModel(sandbox?.model || '');
+    if (modelDef) {
+      const providerName = modelDef.provider === 'opencode' ? 'OpenCode' : 'ZhipuAI';
+      text += `📡 المزود: ${providerName} ${modelDef.free ? '🆓' : '💎'}\n`;
+    }
+
     text += `🧠 التفكير: ${sandbox?.thinking ? '✅ مفعل' : '❌ معطل'}\n`;
     text += `📦 البيئات المعزولة: ${getActiveCount()}/${getMaxSandboxes()}\n`;
     text += `🐧 بيئة لينكس: ${sandbox?.linuxReady ? '✅ جاهزة' : '❌ غير جاهزة'}\n`;
     text += `⚙️ العمليات الجارية: ${getProcessCount()}\n`;
+    text += `🤖 النماذج المتاحة: ${MODELS.length} (${getFreeModels().length} مجاني)\n`;
 
     if (sandbox) {
       const sessionAge = Math.floor((Date.now() - sandbox.createdAt) / 60000);
@@ -185,6 +205,44 @@ registerCommand({
 
     await sendMessage(ctx.chatId, text, {
       reply_markup: isRunning ? { inline_keyboard: [[{ text: '⏹️ إيقاف', callback_data: 'stop_op' }]] } : undefined,
+    });
+  },
+});
+
+registerCommand({
+  name: 'providers',
+  description: 'عرض مزودي API المتاحين',
+  handler: async (ctx) => {
+    const { testOpenCodeConnection } = await import('./zai.js');
+
+    const opencodeKey = process.env.OPENCODE_API_KEY ? '✅' : '❌';
+    const zhipuaiKey = process.env.ZAI_API_KEY ? '✅' : '❌';
+
+    let text = `📡 <b>مزودو API</b>\n\n`;
+
+    text += `🆓 <b>OpenCode Zen</b>\n`;
+    text += `   URL: <code>${process.env.OPENCODE_BASE_URL || 'https://opencode.ai/api/v1'}</code>\n`;
+    text += `   المفتاح: ${opencodeKey}\n`;
+    const opencodeModels = MODELS.filter(m => m.provider === 'opencode');
+    text += `   النماذج: ${opencodeModels.map(m => m.id).join(', ')}\n`;
+    text += `   مجاني: ${opencodeModels.filter(m => m.free).length}/${opencodeModels.length}\n\n`;
+
+    text += `🇨🇳 <b>ZhipuAI (智谱AI)</b>\n`;
+    text += `   URL: <code>${process.env.ZAI_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4'}</code>\n`;
+    text += `   المفتاح: ${zhipuaiKey}\n`;
+    const zhipuModels = MODELS.filter(m => m.provider === 'zhipuai' || m.provider === 'zhipuai-coding');
+    text += `   النماذج: ${zhipuModels.length}\n`;
+    text += `   مجاني: ${zhipuModels.filter(m => m.free).length}/${zhipuModels.length}\n\n`;
+
+    text += `📊 <b>الإجمالي:</b> ${MODELS.length} نموذج (${getFreeModels().length} مجاني)\n`;
+
+    await sendMessage(ctx.chatId, text, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🌟 اختيار النموذج', callback_data: 'models' }],
+          [{ text: '📊 حالة النظام', callback_data: 'status' }],
+        ],
+      },
     });
   },
 });
@@ -349,23 +407,31 @@ registerCommand({
     const sandbox = getActiveSandbox(ctx.chatId);
     const currentModel = sandbox?.model || 'glm-4-flash';
 
-    const models = [
-      { id: 'glm-4-flash', name: 'GLM-4 Flash ⚡', desc: 'سريع وفعال' },
-      { id: 'glm-4-plus', name: 'GLM-4 Plus 💎', desc: 'متميز' },
-      { id: 'glm-4v-flash', name: 'GLM-4V Flash 🖼️', desc: 'بصري سريع' },
-      { id: 'glm-4v-plus', name: 'GLM-4V Plus 🖼️', desc: 'بصري متميز' },
-      { id: 'glm-4-long', name: 'GLM-4 Long 📚', desc: 'سياق طويل' },
-      { id: 'glm-4-air', name: 'GLM-4 Air 🌬️', desc: 'متوازن' },
-      { id: 'glm-z1-air', name: 'GLM-Z1 Air 🧠', desc: 'تفكير' },
-      { id: 'glm-z1-flash', name: 'GLM-Z1 Flash ⚡🧠', desc: 'تفكير سريع' },
-    ];
+    // Build categorized model list
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
 
-    const buttons = models.map(m => [{
-      text: `${m.name}${m.id === currentModel ? ' ✅' : ''} — ${m.desc}`,
-      callback_data: `model_${m.id}`,
-    }]);
+    for (const category of MODEL_CATEGORIES) {
+      const models = getModelsByCategory(category.key);
+      if (models.length === 0) continue;
 
-    await sendMessage(ctx.chatId, `🌟 <b>اختيار النموذج</b>\n\nالحالي: <code>${currentModel}</code>`, {
+      // Category header button (non-functional, just for display)
+      buttons.push([{
+        text: `${category.emoji} ── ${category.label} ──`,
+        callback_data: 'noop',
+      }]);
+
+      for (const m of models) {
+        const isActive = m.id === currentModel;
+        const freeBadge = m.free ? '🆓' : '💎';
+        const providerBadge = m.provider === 'opencode' ? '📡' : '🇨🇳';
+        buttons.push([{
+          text: `${isActive ? '✅ ' : '   '}${freeBadge} ${providerBadge} ${m.name} — ${m.description}${isActive ? ' ◀️' : ''}`,
+          callback_data: `model_${m.id}`,
+        }]);
+      }
+    }
+
+    await sendMessage(ctx.chatId, `🌟 <b>اختيار النموذج</b> (${MODELS.length} نموذج)\n\nالحالي: <code>${currentModel}</code>\n\n🆓 = مجاني | 💎 = مدفوع | 📡 = OpenCode | 🇨🇳 = ZhipuAI`, {
       reply_markup: { inline_keyboard: buttons },
     });
   },

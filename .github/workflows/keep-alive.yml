@@ -2,6 +2,7 @@ name: Keep Alive
 
 on:
   schedule:
+    # Trigger every 10 minutes to ensure the bot workflow is always running
     - cron: '*/10 * * * *'
 
 jobs:

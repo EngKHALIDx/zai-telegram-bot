@@ -1,5 +1,6 @@
 /**
- * Z.ai Telegram Agent v18.2 — GitHub Actions Only
+ * Z.ai Telegram Agent v19.0 — GitHub Actions Only
+ * Multi-provider: OpenCode Zen + ZhipuAI
  * Executes all commands in real Linux bash shell environment
  * Runs exclusively on GitHub Actions with auto-restart via cron
  * Production-ready Agent bot with isolated sandboxes, concurrency limits,
@@ -11,7 +12,7 @@ import {
   getFile, getFileUrl, buildFileBrowserKeyboard,
   type TelegramUpdate, type TelegramMessage, type TelegramCallbackQuery,
 } from './telegram.js';
-import { chatCompletion, visionChat, testConnection, type ChatMessage } from './zai.js';
+import { chatCompletion, visionChat, testConnection, testOpenCodeConnection, type ChatMessage } from './zai.js';
 import { executeTool, AGENT_TOOLS } from './tools.js';
 import {
   startOperation, getOperation, isRunning, stopOperation,
@@ -26,6 +27,7 @@ import {
 import { killAllForChat, killProcess, getProcesses, getAllProcesses } from './process-manager.js';
 import { getCommand, getAllCommands } from './commands.js';
 import type { BotContext } from './commands.js';
+import { getModel, getModelsByCategory, MODEL_CATEGORIES, MODELS, getFreeModels } from './models.js';
 import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
@@ -79,8 +81,12 @@ async function runAgent(chatId: number, userText: string): Promise<void> {
   // Add user message to session
   sandbox.messages.push({ role: 'user', content: userText });
 
+  // Show model provider info
+  const modelDef = getModel(sandbox.model);
+  const providerInfo = modelDef ? ` | 📡 ${modelDef.provider === 'opencode' ? 'OpenCode' : 'ZhipuAI'}` : '';
+
   // Send initial status
-  await sendMessage(chatId, `⏳ <b>جاري التحليل...</b>\n📝 ${escapeHtml(userText.substring(0, 100))}`);
+  await sendMessage(chatId, `⏳ <b>جاري التحليل...</b>\n🤖 ${sandbox.model}${providerInfo}\n📝 ${escapeHtml(userText.substring(0, 100))}`);
   await updateDisplay(chatId);
 
   // Start typing indicator
@@ -342,6 +348,9 @@ async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
         await sendMessage(chatId, 'ℹ️ لا توجد عملية جارية حالياً.');
       }
     }
+    else if (data === 'noop') {
+      // No-op button (for category headers in model list)
+    }
     else if (data === 'new_agent') {
       if (!canCreateSandbox()) {
         const count = getActiveCount();
@@ -356,7 +365,7 @@ async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
         await sendMessage(chatId, '❌ فشل إنشاء بيئة جديدة.');
         return;
       }
-      await sendMessage(chatId, `🆕 <b>مهمة جديدة!</b>\n\nجلسة معزولة — <code>${sb.id}</code>\nأرسل طلبك وسأبدأ العمل.`, {
+      await sendMessage(chatId, `🆕 <b>مهمة جديدة!</b>\n\nجلسة معزولة — <code>${sb.id}</code>\n🤖 النموذج: <code>${sb.model}</code>\nأرسل طلبك وسأبدأ العمل.`, {
         reply_markup: { inline_keyboard: [[{ text: '🌟 النموذج', callback_data: 'models' }]] },
       });
     }
@@ -378,8 +387,18 @@ async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
       const modelId = data.replace('model_', '');
       const sandbox = getActiveSandbox(chatId);
       if (sandbox) {
-        sandbox.model = modelId;
-        await sendMessage(chatId, `✅ تم تغيير النموذج إلى: <b>${modelId}</b>`);
+        const modelDef = getModel(modelId);
+        if (modelDef) {
+          sandbox.model = modelId;
+          const providerName = modelDef.provider === 'opencode' ? 'OpenCode 📡' : 'ZhipuAI 🇨🇳';
+          const freeBadge = modelDef.free ? '🆓' : '💎';
+          await sendMessage(chatId, `✅ تم تغيير النموذج إلى: <b>${modelDef.name}</b>\n📡 المزود: ${providerName} ${freeBadge}`, {
+            reply_markup: { inline_keyboard: [[{ text: '🆕 مهمة جديدة', callback_data: 'new_agent' }]] },
+          });
+        } else {
+          sandbox.model = modelId;
+          await sendMessage(chatId, `✅ تم تغيير النموذج إلى: <b>${modelId}</b>`);
+        }
       } else {
         await sendMessage(chatId, '❌ لا توجد جلسة نشطة.');
       }
@@ -395,6 +414,19 @@ async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
     }
     else if (data === 'status') {
       const cmd = getCommand('status');
+      if (cmd) {
+        await cmd.handler({
+          chatId,
+          sandbox: getActiveSandbox(chatId),
+          operation: getOperation(chatId),
+          isRunning: isRunning(chatId),
+          startTime,
+          args: '',
+        });
+      }
+    }
+    else if (data === 'providers') {
+      const cmd = getCommand('providers');
       if (cmd) {
         await cmd.handler({
           chatId,
@@ -572,7 +604,7 @@ async function handleMessage(msg: TelegramMessage): Promise<void> {
 
       if (fileUrl) {
         const caption = msg.caption || 'حلل هذه الصورة';
-        const visionModel = sandbox?.model?.includes('4v') ? sandbox.model : 'glm-4v-flash';
+        const visionModel = sandbox?.model?.includes('4v') || sandbox?.model?.includes('5v') ? sandbox.model : 'glm-4v-flash';
         const response = await visionChat([{
           role: 'user',
           content: [
@@ -601,7 +633,7 @@ async function handleMessage(msg: TelegramMessage): Promise<void> {
 
 let pollRetryCount = 0;
 let conflictCount = 0;
-const MAX_CONFLICTS = 10; // After this many conflicts, assume another runner exists and back off
+const MAX_CONFLICTS = 10;
 
 async function poll(): Promise<void> {
   if (isPolling) return;
@@ -614,10 +646,9 @@ async function poll(): Promise<void> {
         conflictCount++;
         pollRetryCount++;
         if (conflictCount > MAX_CONFLICTS) {
-          // Another instance is running — back off significantly
           console.warn(`[Poll] ${conflictCount} conflicts detected. Another runner is active. Backing off 60s...`);
           await new Promise(r => setTimeout(r, 60000));
-          conflictCount = 0; // Reset after backoff to check again
+          conflictCount = 0;
         } else if (pollRetryCount > 5) {
           console.warn('[Poll] Conflict persists, waiting 30s...');
           await new Promise(r => setTimeout(r, 30000));
@@ -669,6 +700,7 @@ function logHealth(): void {
     `Sandboxes: ${getActiveCount()}/${getMaxSandboxes()} | ` +
     `Processes: ${getAllProcesses().length} | ` +
     `Conflicts: ${conflictCount} | ` +
+    `Models: ${MODELS.length} (${getFreeModels().length} free) | ` +
     `Mem: RSS=${mb(mem.rss)}MB Heap=${mb(mem.heapUsed)}/${mb(mem.heapTotal)}MB`
   );
 }
@@ -690,9 +722,6 @@ function gracefulShutdown(signal: string): void {
     try { proc.child.kill('SIGTERM'); } catch {}
   }
 
-  // Stop all operations
-  // (We don't iterate activeOps directly, but we can try to clean up)
-
   console.log('[Bot] Cleanup complete. Goodbye!');
   process.exit(0);
 }
@@ -700,24 +729,34 @@ function gracefulShutdown(signal: string): void {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
-  console.log(`[Bot] Z.ai Agent v18.2 (GitHub Actions Only) starting...`);
+  console.log(`[Bot] Z.ai Agent v19.0 (GitHub Actions Only) starting...`);
   console.log(`[Bot] Server: ${IS_GITHUB_ACTIONS ? `GitHub Actions #${GITHUB_RUN_NUMBER} (Run: ${GITHUB_RUN_ID})` : 'Local (dev only)'}`);
   console.log(`[Bot] OS: ${RUNNER_OS}`);
   console.log(`[Bot] Max sandboxes: ${getMaxSandboxes()}`);
   console.log(`[Bot] Allowed users: ${ALLOWED.length > 0 ? ALLOWED.join(', ') : 'Everyone'}`);
+  console.log(`[Bot] Models: ${MODELS.length} (${getFreeModels().length} free)`);
 
   // Test Telegram connection
   const me = await getMe();
   if (!me?.ok) { console.error('[FATAL] Bad bot token:', me?.description); process.exit(1); }
   console.log(`[Bot] Connected: @${me.result.username} (${me.result.first_name})`);
 
-  // Test Z.ai API connection
+  // Test ZhipuAI API connection
   const apiTest = await testConnection();
   if (apiTest.ok) {
-    console.log(`[API] Connected! Model: ${apiTest.model}`);
+    console.log(`[API] ZhipuAI: ✅ Connected! Model: ${apiTest.model}`);
   } else {
-    console.warn(`[API] Warning: ${apiTest.error}`);
-    console.warn('[API] Bot will start but API calls may fail');
+    console.warn(`[API] ZhipuAI: ⚠️ ${apiTest.error}`);
+    console.warn('[API] Bot will start but ZhipuAI calls may fail');
+  }
+
+  // Test OpenCode API connection
+  const opencodeTest = await testOpenCodeConnection();
+  if (opencodeTest.ok) {
+    console.log(`[API] OpenCode: ✅ Connected! Model: ${opencodeTest.model}`);
+  } else {
+    console.warn(`[API] OpenCode: ⚠️ ${opencodeTest.error}`);
+    console.warn('[API] OpenCode models will not be available');
   }
 
   await deleteWebhook();
@@ -727,8 +766,6 @@ async function main() {
   startIdleCleanup();
 
   // Poll loop — adaptive interval based on environment
-  // GitHub Actions: 1.5s (fast response)
-  // With conflicts: 3s (reduce API pressure)
   const baseInterval = IS_GITHUB_ACTIONS ? 1500 : 2000;
   const loop = () => poll().finally(() => setTimeout(loop, conflictCount > 3 ? 3000 : baseInterval));
   loop();
@@ -744,9 +781,7 @@ async function main() {
   console.log(`[Bot] Registered ${commands.length} commands: ${commands.map(c => `/${c.name}`).join(', ')}`);
 
   // GitHub Actions: Send startup notification to allowed user
-  if (IS_GITHUB_ACTIONS && ALLOWED.length > 0) {
-    // Find the first allowed user's chat — we'll send to a known admin chat
-    // For now, just log it
+  if (IS_GITHUB_ACTIONS) {
     console.log(`[Bot] Running on GitHub Actions — 24/7 mode active`);
   }
 }
