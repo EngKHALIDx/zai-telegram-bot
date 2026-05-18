@@ -1,7 +1,8 @@
 /**
- * Z.ai Telegram Agent v18.0
+ * Z.ai Telegram Agent v19.0
  * Production-ready Agent bot with isolated sandboxes, concurrency limits,
  * real-time operations display, file browser, process tracking, streaming
+ * Multi-provider model support: ZhipuAI + OpenCode Zen + Coding Plan
  */
 import {
   getUpdates, deleteWebhook, getMe, sendMessage, answerCallbackQuery,
@@ -28,11 +29,24 @@ import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
 const ALLOWED = (process.env.ALLOWED_USERNAMES || '').split(',').map(u => u.trim().replace('@', '').toLowerCase()).filter(u => u);
-const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'glm-4-flash';
+const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'big-pickle';
 
 let lastUpdateId = 0;
 let isPolling = false;
 const startTime = Date.now();
+
+// ─── Category label helper ────────────────────────────────
+
+function getCategoryLabelAr(category: string): string {
+  const labels: Record<string, string> = {
+    free: '🆓 مجانية',
+    language: '💬 لغوية',
+    vision: '🖼️ بصرية',
+    reasoning: '🧠 استدلال',
+    specialized: '🔧 متخصصة',
+  };
+  return labels[category] || category;
+}
 
 // ─── Auth ──────────────────────────────────────────────────
 
@@ -367,12 +381,87 @@ async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
         });
       }
     }
+    else if (data.startsWith('modelcat_')) {
+      // Model category selection
+      const category = data.replace('modelcat_', '');
+      const { getModelsByCategory, getModel: getMdl, getCategoryLabel } = await import('./models.js');
+      const sandbox = getActiveSandbox(chatId);
+      const currentModel = sandbox?.model || DEFAULT_MODEL;
+      const models = getModelsByCategory(category as any);
+      const catLabel = getCategoryLabel(category as any);
+
+      const buttons = models.map(m => [{
+        text: `${m.emoji} ${m.name}${m.id === currentModel ? ' ✅' : ''} — ${m.description}`,
+        callback_data: `model_${m.id}`,
+      }]);
+
+      buttons.push([{ text: '🔙 جميع الفئات', callback_data: 'models' }]);
+
+      await sendMessage(chatId, `${catLabel} <b>النماذج</b> (${models.length})
+
+الحالي: <code>${(() => { const mi = getMdl(currentModel); return mi ? `${mi.emoji} ${mi.name}` : currentModel; })()}</code>`, {
+        reply_markup: { inline_keyboard: buttons },
+      });
+    }
+    else if (data.startsWith('modelinfo_')) {
+      // Show model details
+      const modelId = data.replace('modelinfo_', '');
+      const { getModel: getMdl } = await import('./models.js');
+      const mdl = getMdl(modelId);
+      if (mdl) {
+        let info = `📋 <b>${mdl.emoji} ${mdl.name}</b>
+
+`;
+        info += `🆔 المعرف: <code>${mdl.id}</code>
+`;
+        info += `📡 المزود: ${mdl.provider}
+`;
+        info += `📂 الفئة: ${getCategoryLabelAr(mdl.category)}
+`;
+        info += `💰 السعر: ${mdl.free ? 'مجاني ✅' : 'مدفوع 💎'}
+`;
+        if (mdl.contextLimit) info += `📏 السياق: ${(mdl.contextLimit / 1000).toFixed(0)}K tokens
+`;
+        if (mdl.maxOutput) info += `📤 المخرج: ${(mdl.maxOutput / 1000).toFixed(0)}K tokens
+`;
+        info += `🔧 الأدوات: ${mdl.supportsTools ? '✅' : '❌'}
+`;
+        info += `🖼️ البصرية: ${mdl.supportsVision ? '✅' : '❌'}
+`;
+        info += `🧠 التفكير: ${mdl.supportsThinking ? '✅' : '❌'}
+`;
+        info += `
+📝 ${mdl.description}`;
+
+        await sendMessage(chatId, info, {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: `✅ استخدام ${mdl.name}`, callback_data: `model_${mdl.id}` }],
+              [{ text: '🔙 العودة', callback_data: 'models' }],
+            ],
+          },
+        });
+      } else {
+        await sendMessage(chatId, `❌ النموذج ${modelId} غير موجود.`);
+      }
+    }
     else if (data.startsWith('model_')) {
       const modelId = data.replace('model_', '');
       const sandbox = getActiveSandbox(chatId);
+      const { getModel: getMdl, requiresOpenCodeKey } = await import('./models.js');
+      const mdl = getMdl(modelId);
+
       if (sandbox) {
         sandbox.model = modelId;
-        await sendMessage(chatId, `✅ تم تغيير النموذج إلى: <b>${modelId}</b>`);
+        const modelLabel = mdl ? `${mdl.emoji} ${mdl.name}` : modelId;
+        const providerNote = mdl?.provider === 'opencode' ? ' (OpenCode)' : mdl?.provider === 'zhipuai-coding' ? ' (Coding Plan)' : '';
+        await sendMessage(chatId, `✅ تم تغيير النموذج إلى: <b>${modelLabel}</b>${providerNote}`);
+
+        // Warn if thinking is on but model doesn't support it
+        if (sandbox.thinking && mdl && !mdl.supportsThinking) {
+          sandbox.thinking = false;
+          await sendMessage(chatId, `⚠️ التفكير العميق معطل — ${mdl.name} لا يدعمه.`);
+        }
       } else {
         await sendMessage(chatId, '❌ لا توجد جلسة نشطة.');
       }
@@ -654,7 +743,7 @@ function gracefulShutdown(signal: string): void {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
-  console.log('[Bot] Z.ai Agent v18.0 starting...');
+  console.log('[Bot] Z.ai Agent v19.0 starting...');
   console.log(`[Bot] Max sandboxes: ${getMaxSandboxes()}`);
   console.log(`[Bot] Allowed users: ${ALLOWED.length > 0 ? ALLOWED.join(', ') : 'Everyone'}`);
 

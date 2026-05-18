@@ -1,11 +1,13 @@
 /**
- * Sandbox & Session Management v18.0
+ * Sandbox & Session Management v19.0
  * Isolated Agent sessions with concurrency limits, idle cleanup, and per-session workspaces
+ * Supports multi-provider models
  */
 import { mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import type { ChatMessage } from './zai.js';
 import { getAgentSystemPrompt } from './tools.js';
+import { getModel } from './models.js';
 
 // ─── Configuration ────────────────────────────────────────
 
@@ -76,12 +78,17 @@ export function createSandbox(chatId: number): Sandbox | null {
     chatId,
     workDir,
     messages: [{ role: 'system', content: getAgentSystemPrompt() }],
-    model: process.env.DEFAULT_MODEL || 'glm-4-flash',
+    model: process.env.DEFAULT_MODEL || 'big-pickle',
     thinking: false,
     createdAt: Date.now(),
     lastActiveAt: Date.now(),
     activeProcessPids: [],
   };
+
+  // Validate model exists, fallback to glm-4-flash if not
+  if (!getModel(sandbox.model)) {
+    sandbox.model = 'glm-4-flash';
+  }
 
   sandboxes.set(id, sandbox);
   chatActiveSandbox.set(chatId, id);
@@ -112,12 +119,16 @@ export function getOrCreateSandbox(chatId: number): Sandbox {
     const sandbox: Sandbox = {
       id, chatId, workDir,
       messages: [{ role: 'system', content: getAgentSystemPrompt() }],
-      model: process.env.DEFAULT_MODEL || 'glm-4-flash',
+      model: process.env.DEFAULT_MODEL || 'big-pickle',
       thinking: false,
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
       activeProcessPids: [],
     };
+    // Validate model exists
+    if (!getModel(sandbox.model)) {
+      sandbox.model = 'glm-4-flash';
+    }
     sandboxes.set(id, sandbox);
     chatActiveSandbox.set(chatId, id);
     return sandbox;

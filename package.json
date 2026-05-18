@@ -1,7 +1,7 @@
 {
   "name": "zai-telegram-agent",
-  "version": "18.0.0",
-  "description": "Z.ai Telegram Agent v18.0 - Production-ready agent with isolated sandboxes, concurrency limits, streaming, and file browser",
+  "version": "19.0.0",
+  "description": "Z.ai Telegram Agent v19.0 - Multi-provider model support (OpenCode + ZhipuAI), 22+ models, isolated sandboxes, streaming",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {

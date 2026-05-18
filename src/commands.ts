@@ -1,12 +1,13 @@
 /**
- * Command Registry v18.0
+ * Command Registry v19.0
  * Extensible command handler system
  * All user-facing text is in ARABIC
+ * Multi-provider model support with categories
  */
 import { sendMessage, escapeHtml } from './telegram.js';
 import type { Sandbox } from './sandbox.js';
 import type { ActiveOperation } from './operations.js';
-import type { TrackedProcess } from './process-manager.js';
+import { MODELS, getModel, getModelsByCategory, MODEL_CATEGORIES, requiresOpenCodeKey, getCategoryLabel } from './models.js';
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -59,7 +60,7 @@ registerCommand({
   description: 'رسالة الترحيب والقائمة الرئيسية',
   handler: async (ctx) => {
     await sendMessage(ctx.chatId, `
-🤖 <b>Z.ai Agent v18.0</b>
+🤖 <b>Z.ai Agent v19.0</b>
 
 أنا وكيل ذكي يعمل مثل وضع Agent في chat.z.ai!
 أستطيع بناء تطبيقات، كتابة كود، تنفيذ أوامر، بحث الويب، وأكثر.
@@ -72,9 +73,15 @@ registerCommand({
 • تحليل الملفات والإجابة على الأسئلة
 • تنفيذ أوامر Shell على النظام مباشرة
 
+🆕 <b>الجديد في v19.0:</b>
+• 4 نماذج مجانية من OpenCode (Big Pickle, DeepSeek V4, MiniMax, Nemotron)
+• 22 نموذج GLM جديد (GLM-5.1, GLM-5, GLM-4.7, GLM-4.6...)
+• دعم متعدد المزودين (ZhipuAI + OpenCode Zen)
+• تصنيف النماذج حسب الفئة (مجاني، لغوي، بصري، استدلال)
+
 📋 <b>الأوامر:</b>
 /new — مهمة جديدة (جلسة معزولة)
-/model — اختيار النموذج
+/model — اختيار النموذج (22+ نموذج)
 /think — التفكير العميق
 /stop — إيقاف العملية الحالية
 /status — حالة النظام
@@ -84,6 +91,7 @@ registerCommand({
 /history — آخر الجلسات
 /release — تحرير بيئة معزولة
 /reset — إعادة تعيين كل شيء
+/providers — حالة المزودين
 
 💡 <b>أرسل أي طلب وسأبدأ العمل فوراً!</b>
 `, {
@@ -128,6 +136,7 @@ registerCommand({
     // Import dynamically to avoid circular deps
     const { getActiveCount, getMaxSandboxes } = await import('./sandbox.js');
     const { getProcessCount } = await import('./process-manager.js');
+    const { getProviderStatus } = await import('./zai.js');
 
     let text = `📊 <b>حالة النظام</b>\n\n`;
     text += `🟢 البوت: يعمل\n`;
@@ -137,10 +146,16 @@ registerCommand({
     text += `📦 البيئات المعزولة: ${getActiveCount()}/${getMaxSandboxes()}\n`;
     text += `⚙️ العمليات الجارية: ${getProcessCount()}\n`;
 
+    // Provider status
+    text += `\n📡 <b>المزودون:</b>\n`;
+    for (const p of getProviderStatus()) {
+      text += `  ${p.configured ? '✅' : '❌'} ${p.provider} (${p.baseURL})\n`;
+    }
+
     if (sandbox) {
       const sessionAge = Math.floor((Date.now() - sandbox.createdAt) / 60000);
       const idleTime = Math.floor((Date.now() - sandbox.lastActiveAt) / 60000);
-      text += `📝 الجلسة: ${sandbox.messages.length} رسالة (${sessionAge} دقيقة)\n`;
+      text += `\n📝 الجلسة: ${sandbox.messages.length} رسالة (${sessionAge} دقيقة)\n`;
       text += `🕐 آخر نشاط: ${idleTime}م مضت\n`;
       text += `📂 مساحة العمل: <code>${sandbox.id}</code>\n`;
     }
@@ -159,6 +174,27 @@ registerCommand({
     await sendMessage(ctx.chatId, text, {
       reply_markup: isRunning ? { inline_keyboard: [[{ text: '⏹️ إيقاف', callback_data: 'stop_op' }]] } : undefined,
     });
+  },
+});
+
+registerCommand({
+  name: 'providers',
+  description: 'حالة مزودي API',
+  handler: async (ctx) => {
+    const { getProviderStatus, testConnection } = await import('./zai.js');
+    const providers = getProviderStatus();
+
+    let text = `📡 <b>حالة المزودين</b>\n\n`;
+    for (const p of providers) {
+      text += `${p.configured ? '✅' : '❌'} <b>${p.provider}</b>\n`;
+      text += `   🌐 ${p.baseURL}\n`;
+      text += `   🔑 ${p.configured ? 'مُعد' : 'غير مُعد'}\n\n`;
+    }
+
+    text += `\n💡 <b>لتفعيل OpenCode:</b>\nأضف OPENCODE_API_KEY في متغيرات البيئة`;
+    text += `\n\n💡 <b>لتفعيل Coding Plan:</b>\nأضف ZAI_CODING_BASE_URL في متغيرات البيئة`;
+
+    await sendMessage(ctx.chatId, text);
   },
 });
 
@@ -182,9 +218,12 @@ registerCommand({
         const msgCount = sb.messages.length;
         const procCount = sb.activeProcessPids.length;
 
+        const modelInfo = getModel(sb.model);
+        const modelLabel = modelInfo ? `${modelInfo.emoji} ${modelInfo.name}` : sb.model;
+
         text += `${isActive ? '👉' : '📦'} <b>${sb.id}</b>\n`;
         text += `   ⏱️ ${age}م | 🕐 خامل: ${idle}م | 📝 ${msgCount} رسالة | ⚙️ ${procCount} عملية\n`;
-        text += `   🤖 ${sb.model} | 🧠 ${sb.thinking ? 'مفعل' : 'معطل'}\n\n`;
+        text += `   🤖 ${modelLabel} | 🧠 ${sb.thinking ? 'مفعل' : 'معطل'}\n\n`;
       }
     }
 
@@ -275,7 +314,6 @@ registerCommand({
       await sendMessage(ctx.chatId, '❌ لا توجد جلسة نشطة. استخدم /new أولاً.');
       return;
     }
-    // Trigger the file browser callback
     await sendMessage(ctx.chatId, '📂 <b>تصفح الملفات</b>\n\nجاري التحميل...', {
       reply_markup: { inline_keyboard: [[{ text: '📂 فتح المتصفح', callback_data: 'browse_root' }]] },
     });
@@ -297,7 +335,6 @@ registerCommand({
         await sendMessage(ctx.chatId, `❌ لم يتم العثور على البيئة ${sandboxId}`);
       }
     } else {
-      // Show list to choose
       const sandboxList = listSandboxes(ctx.chatId);
       if (sandboxList.length === 0) {
         await sendMessage(ctx.chatId, 'ℹ️ لا توجد بيئات لتحريرها.');
@@ -316,29 +353,63 @@ registerCommand({
 
 registerCommand({
   name: 'model',
-  description: 'اختيار النموذج',
+  description: 'اختيار النموذج (22+ نموذج)',
   handler: async (ctx) => {
     const { getActiveSandbox } = await import('./sandbox.js');
     const sandbox = getActiveSandbox(ctx.chatId);
     const currentModel = sandbox?.model || 'glm-4-flash';
+    const currentModelInfo = getModel(currentModel);
 
-    const models = [
-      { id: 'glm-4-flash', name: 'GLM-4 Flash ⚡', desc: 'سريع وفعال' },
-      { id: 'glm-4-plus', name: 'GLM-4 Plus 💎', desc: 'متميز' },
-      { id: 'glm-4v-flash', name: 'GLM-4V Flash 🖼️', desc: 'بصري سريع' },
-      { id: 'glm-4v-plus', name: 'GLM-4V Plus 🖼️', desc: 'بصري متميز' },
-      { id: 'glm-4-long', name: 'GLM-4 Long 📚', desc: 'سياق طويل' },
-      { id: 'glm-4-air', name: 'GLM-4 Air 🌬️', desc: 'متوازن' },
-      { id: 'glm-z1-air', name: 'GLM-Z1 Air 🧠', desc: 'تفكير' },
-      { id: 'glm-z1-flash', name: 'GLM-Z1 Flash ⚡🧠', desc: 'تفكير سريع' },
-    ];
+    // Check if user specified a category
+    const categoryArg = ctx.args.trim().toLowerCase();
 
-    const buttons = models.map(m => [{
-      text: `${m.name}${m.id === currentModel ? ' ✅' : ''} — ${m.desc}`,
-      callback_data: `model_${m.id}`,
-    }]);
+    if (categoryArg && categoryArg !== '') {
+      // Show models for specific category
+      const categoryKey = MODEL_CATEGORIES.find(c =>
+        c.label.includes(categoryArg) || c.key === categoryArg
+      )?.key;
 
-    await sendMessage(ctx.chatId, `🌟 <b>اختيار النموذج</b>\n\nالحالي: <code>${currentModel}</code>`, {
+      if (categoryKey) {
+        const models = getModelsByCategory(categoryKey);
+        const buttons = models.map(m => [{
+          text: `${m.emoji} ${m.name}${m.id === currentModel ? ' ✅' : ''} — ${m.description}`,
+          callback_data: `model_${m.id}`,
+        }]);
+
+        await sendMessage(ctx.chatId, `${getCategoryLabel(categoryKey)} <b>النماذج</b>\n\nالحالي: <code>${currentModelInfo ? currentModelInfo.name : currentModel}</code>`, {
+          reply_markup: {
+            inline_keyboard: [
+              ...buttons,
+              [{ text: '🔙 جميع الفئات', callback_data: 'models' }],
+            ],
+          },
+        });
+        return;
+      }
+    }
+
+    // Show category selection
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+
+    for (const cat of MODEL_CATEGORIES) {
+      const count = getModelsByCategory(cat.key).length;
+      if (count > 0) {
+        buttons.push([{
+          text: `${cat.emoji} ${cat.label} (${count} نموذج)`,
+          callback_data: `modelcat_${cat.key}`,
+        }]);
+      }
+    }
+
+    // Add quick access to current model info
+    if (currentModelInfo) {
+      buttons.push([{
+        text: `✅ النموذج الحالي: ${currentModelInfo.emoji} ${currentModelInfo.name}`,
+        callback_data: `modelinfo_${currentModel}`,
+      }]);
+    }
+
+    await sendMessage(ctx.chatId, `🌟 <b>اختيار النموذج</b>\n\nالحالي: <code>${currentModelInfo ? `${currentModelInfo.emoji} ${currentModelInfo.name}` : currentModel}</code>\n\nاختر فئة:`, {
       reply_markup: { inline_keyboard: buttons },
     });
   },
@@ -354,6 +425,16 @@ registerCommand({
       await sendMessage(ctx.chatId, '❌ لا توجد جلسة نشطة. استخدم /new أولاً.');
       return;
     }
+
+    // Check if model supports thinking
+    const modelInfo = getModel(sandbox.model);
+    if (modelInfo && !modelInfo.supportsThinking) {
+      await sendMessage(ctx.chatId, `⚠️ النموذج ${modelInfo.name} لا يدعم التفكير العميق.\n\n💡 جرب: GLM-5.1, GLM-5, GLM-4.7, GLM-4.6, GLM-4.5, GLM-Z1`, {
+        reply_markup: { inline_keyboard: [[{ text: '🌟 تغيير النموذج', callback_data: 'models' }]] },
+      });
+      return;
+    }
+
     sandbox.thinking = !sandbox.thinking;
     await sendMessage(ctx.chatId, `🧠 التفكير العميق: ${sandbox.thinking ? '✅ مفعل' : '❌ معطل'}`);
   },
