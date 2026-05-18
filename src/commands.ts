@@ -1,13 +1,12 @@
 /**
- * Command Registry v19.0
+ * Command Registry v18.0
  * Extensible command handler system
  * All user-facing text is in ARABIC
- * Multi-provider model support with categories
  */
 import { sendMessage, escapeHtml } from './telegram.js';
 import type { Sandbox } from './sandbox.js';
 import type { ActiveOperation } from './operations.js';
-import { MODELS, getModel, getModelsByCategory, MODEL_CATEGORIES, requiresOpenCodeKey, getCategoryLabel } from './models.js';
+import type { TrackedProcess } from './process-manager.js';
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -60,38 +59,38 @@ registerCommand({
   description: 'رسالة الترحيب والقائمة الرئيسية',
   handler: async (ctx) => {
     await sendMessage(ctx.chatId, `
-🤖 <b>Z.ai Agent v19.0</b>
+🤖 <b>Z.ai Agent v18.1</b> — 🐧 بيئة لينكس
 
-أنا وكيل ذكي يعمل مثل وضع Agent في chat.z.ai!
-أستطيع بناء تطبيقات، كتابة كود، تنفيذ أوامر، بحث الويب، وأكثر.
+أنا وكيل ذكي يعمل في بيئة لينكس حقيقية!
+أستطيع تنفيذ أوامر Bash، بناء تطبيقات، كتابة كود، بحث الويب، وأكثر.
+
+🐧 <b>بيئة لينكس:</b>
+• أوامر Bash تنفذ في /bin/bash login shell
+• أدوات: python3, node, npm, pip3, git, curl, wget, gcc...
+• تثبيت حزم: apt-get, npm, pip3
+• كل جلسة لها مساحة عمل معزولة
 
 🏗️ <b>ما يمكنني فعله:</b>
 • بناء مواقع وتطبيقات كاملة
 • إنشاء مشاريع ورفعها على GitHub
 • كتابة وتنفيذ كود JavaScript/Python/Bash
 • بحث في الويب وإنشاء صور بالذكاء الاصطناعي
-• تحليل الملفات والإجابة على الأسئلة
-• تنفيذ أوامر Shell على النظام مباشرة
-
-🆕 <b>الجديد في v19.0:</b>
-• 4 نماذج مجانية من OpenCode (Big Pickle, DeepSeek V4, MiniMax, Nemotron)
-• 22 نموذج GLM جديد (GLM-5.1, GLM-5, GLM-4.7, GLM-4.6...)
-• دعم متعدد المزودين (ZhipuAI + OpenCode Zen)
-• تصنيف النماذج حسب الفئة (مجاني، لغوي، بصري، استدلال)
+• تنفيذ أوامر Shell في بيئة لينكس
+• تثبيت أي حزمة عبر apt/npm/pip
 
 📋 <b>الأوامر:</b>
 /new — مهمة جديدة (جلسة معزولة)
-/model — اختيار النموذج (22+ نموذج)
+/model — اختيار النموذج
 /think — التفكير العميق
 /stop — إيقاف العملية الحالية
 /status — حالة النظام
+/linux — معلومات بيئة لينكس
 /files — تصفح ملفات المساحة
 /sandboxes — عرض البيئات المعزولة
 /processes — العمليات الجارية
 /history — آخر الجلسات
 /release — تحرير بيئة معزولة
 /reset — إعادة تعيين كل شيء
-/providers — حالة المزودين
 
 💡 <b>أرسل أي طلب وسأبدأ العمل فوراً!</b>
 `, {
@@ -104,10 +103,10 @@ registerCommand({
           ],
           [
             { text: '📊 حالة النظام', callback_data: 'status' },
-            { text: '📂 الملفات', callback_data: 'browse_root' },
+            { text: '🐧 لينكس', callback_data: 'linux_info' },
           ],
           [
-            { text: '📦 البيئات', callback_data: 'sandboxes' },
+            { text: '📂 الملفات', callback_data: 'browse_root' },
             { text: '📜 السجل', callback_data: 'history' },
           ],
         ],
@@ -136,7 +135,6 @@ registerCommand({
     // Import dynamically to avoid circular deps
     const { getActiveCount, getMaxSandboxes } = await import('./sandbox.js');
     const { getProcessCount } = await import('./process-manager.js');
-    const { getProviderStatus } = await import('./zai.js');
 
     let text = `📊 <b>حالة النظام</b>\n\n`;
     text += `🟢 البوت: يعمل\n`;
@@ -144,18 +142,13 @@ registerCommand({
     text += `🤖 النموذج: <code>${sandbox?.model || 'غير محدد'}</code>\n`;
     text += `🧠 التفكير: ${sandbox?.thinking ? '✅ مفعل' : '❌ معطل'}\n`;
     text += `📦 البيئات المعزولة: ${getActiveCount()}/${getMaxSandboxes()}\n`;
+    text += `🐧 بيئة لينكس: ${sandbox?.linuxReady ? '✅ جاهزة' : '❌ غير جاهزة'}\n`;
     text += `⚙️ العمليات الجارية: ${getProcessCount()}\n`;
-
-    // Provider status
-    text += `\n📡 <b>المزودون:</b>\n`;
-    for (const p of getProviderStatus()) {
-      text += `  ${p.configured ? '✅' : '❌'} ${p.provider} (${p.baseURL})\n`;
-    }
 
     if (sandbox) {
       const sessionAge = Math.floor((Date.now() - sandbox.createdAt) / 60000);
       const idleTime = Math.floor((Date.now() - sandbox.lastActiveAt) / 60000);
-      text += `\n📝 الجلسة: ${sandbox.messages.length} رسالة (${sessionAge} دقيقة)\n`;
+      text += `📝 الجلسة: ${sandbox.messages.length} رسالة (${sessionAge} دقيقة)\n`;
       text += `🕐 آخر نشاط: ${idleTime}م مضت\n`;
       text += `📂 مساحة العمل: <code>${sandbox.id}</code>\n`;
     }
@@ -174,27 +167,6 @@ registerCommand({
     await sendMessage(ctx.chatId, text, {
       reply_markup: isRunning ? { inline_keyboard: [[{ text: '⏹️ إيقاف', callback_data: 'stop_op' }]] } : undefined,
     });
-  },
-});
-
-registerCommand({
-  name: 'providers',
-  description: 'حالة مزودي API',
-  handler: async (ctx) => {
-    const { getProviderStatus, testConnection } = await import('./zai.js');
-    const providers = getProviderStatus();
-
-    let text = `📡 <b>حالة المزودين</b>\n\n`;
-    for (const p of providers) {
-      text += `${p.configured ? '✅' : '❌'} <b>${p.provider}</b>\n`;
-      text += `   🌐 ${p.baseURL}\n`;
-      text += `   🔑 ${p.configured ? 'مُعد' : 'غير مُعد'}\n\n`;
-    }
-
-    text += `\n💡 <b>لتفعيل OpenCode:</b>\nأضف OPENCODE_API_KEY في متغيرات البيئة`;
-    text += `\n\n💡 <b>لتفعيل Coding Plan:</b>\nأضف ZAI_CODING_BASE_URL في متغيرات البيئة`;
-
-    await sendMessage(ctx.chatId, text);
   },
 });
 
@@ -218,12 +190,9 @@ registerCommand({
         const msgCount = sb.messages.length;
         const procCount = sb.activeProcessPids.length;
 
-        const modelInfo = getModel(sb.model);
-        const modelLabel = modelInfo ? `${modelInfo.emoji} ${modelInfo.name}` : sb.model;
-
         text += `${isActive ? '👉' : '📦'} <b>${sb.id}</b>\n`;
         text += `   ⏱️ ${age}م | 🕐 خامل: ${idle}م | 📝 ${msgCount} رسالة | ⚙️ ${procCount} عملية\n`;
-        text += `   🤖 ${modelLabel} | 🧠 ${sb.thinking ? 'مفعل' : 'معطل'}\n\n`;
+        text += `   🤖 ${sb.model} | 🧠 ${sb.thinking ? 'مفعل' : 'معطل'}\n\n`;
       }
     }
 
@@ -314,6 +283,7 @@ registerCommand({
       await sendMessage(ctx.chatId, '❌ لا توجد جلسة نشطة. استخدم /new أولاً.');
       return;
     }
+    // Trigger the file browser callback
     await sendMessage(ctx.chatId, '📂 <b>تصفح الملفات</b>\n\nجاري التحميل...', {
       reply_markup: { inline_keyboard: [[{ text: '📂 فتح المتصفح', callback_data: 'browse_root' }]] },
     });
@@ -335,6 +305,7 @@ registerCommand({
         await sendMessage(ctx.chatId, `❌ لم يتم العثور على البيئة ${sandboxId}`);
       }
     } else {
+      // Show list to choose
       const sandboxList = listSandboxes(ctx.chatId);
       if (sandboxList.length === 0) {
         await sendMessage(ctx.chatId, 'ℹ️ لا توجد بيئات لتحريرها.');
@@ -353,63 +324,29 @@ registerCommand({
 
 registerCommand({
   name: 'model',
-  description: 'اختيار النموذج (22+ نموذج)',
+  description: 'اختيار النموذج',
   handler: async (ctx) => {
     const { getActiveSandbox } = await import('./sandbox.js');
     const sandbox = getActiveSandbox(ctx.chatId);
     const currentModel = sandbox?.model || 'glm-4-flash';
-    const currentModelInfo = getModel(currentModel);
 
-    // Check if user specified a category
-    const categoryArg = ctx.args.trim().toLowerCase();
+    const models = [
+      { id: 'glm-4-flash', name: 'GLM-4 Flash ⚡', desc: 'سريع وفعال' },
+      { id: 'glm-4-plus', name: 'GLM-4 Plus 💎', desc: 'متميز' },
+      { id: 'glm-4v-flash', name: 'GLM-4V Flash 🖼️', desc: 'بصري سريع' },
+      { id: 'glm-4v-plus', name: 'GLM-4V Plus 🖼️', desc: 'بصري متميز' },
+      { id: 'glm-4-long', name: 'GLM-4 Long 📚', desc: 'سياق طويل' },
+      { id: 'glm-4-air', name: 'GLM-4 Air 🌬️', desc: 'متوازن' },
+      { id: 'glm-z1-air', name: 'GLM-Z1 Air 🧠', desc: 'تفكير' },
+      { id: 'glm-z1-flash', name: 'GLM-Z1 Flash ⚡🧠', desc: 'تفكير سريع' },
+    ];
 
-    if (categoryArg && categoryArg !== '') {
-      // Show models for specific category
-      const categoryKey = MODEL_CATEGORIES.find(c =>
-        c.label.includes(categoryArg) || c.key === categoryArg
-      )?.key;
+    const buttons = models.map(m => [{
+      text: `${m.name}${m.id === currentModel ? ' ✅' : ''} — ${m.desc}`,
+      callback_data: `model_${m.id}`,
+    }]);
 
-      if (categoryKey) {
-        const models = getModelsByCategory(categoryKey);
-        const buttons = models.map(m => [{
-          text: `${m.emoji} ${m.name}${m.id === currentModel ? ' ✅' : ''} — ${m.description}`,
-          callback_data: `model_${m.id}`,
-        }]);
-
-        await sendMessage(ctx.chatId, `${getCategoryLabel(categoryKey)} <b>النماذج</b>\n\nالحالي: <code>${currentModelInfo ? currentModelInfo.name : currentModel}</code>`, {
-          reply_markup: {
-            inline_keyboard: [
-              ...buttons,
-              [{ text: '🔙 جميع الفئات', callback_data: 'models' }],
-            ],
-          },
-        });
-        return;
-      }
-    }
-
-    // Show category selection
-    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
-
-    for (const cat of MODEL_CATEGORIES) {
-      const count = getModelsByCategory(cat.key).length;
-      if (count > 0) {
-        buttons.push([{
-          text: `${cat.emoji} ${cat.label} (${count} نموذج)`,
-          callback_data: `modelcat_${cat.key}`,
-        }]);
-      }
-    }
-
-    // Add quick access to current model info
-    if (currentModelInfo) {
-      buttons.push([{
-        text: `✅ النموذج الحالي: ${currentModelInfo.emoji} ${currentModelInfo.name}`,
-        callback_data: `modelinfo_${currentModel}`,
-      }]);
-    }
-
-    await sendMessage(ctx.chatId, `🌟 <b>اختيار النموذج</b>\n\nالحالي: <code>${currentModelInfo ? `${currentModelInfo.emoji} ${currentModelInfo.name}` : currentModel}</code>\n\nاختر فئة:`, {
+    await sendMessage(ctx.chatId, `🌟 <b>اختيار النموذج</b>\n\nالحالي: <code>${currentModel}</code>`, {
       reply_markup: { inline_keyboard: buttons },
     });
   },
@@ -425,16 +362,6 @@ registerCommand({
       await sendMessage(ctx.chatId, '❌ لا توجد جلسة نشطة. استخدم /new أولاً.');
       return;
     }
-
-    // Check if model supports thinking
-    const modelInfo = getModel(sandbox.model);
-    if (modelInfo && !modelInfo.supportsThinking) {
-      await sendMessage(ctx.chatId, `⚠️ النموذج ${modelInfo.name} لا يدعم التفكير العميق.\n\n💡 جرب: GLM-5.1, GLM-5, GLM-4.7, GLM-4.6, GLM-4.5, GLM-Z1`, {
-        reply_markup: { inline_keyboard: [[{ text: '🌟 تغيير النموذج', callback_data: 'models' }]] },
-      });
-      return;
-    }
-
     sandbox.thinking = !sandbox.thinking;
     await sendMessage(ctx.chatId, `🧠 التفكير العميق: ${sandbox.thinking ? '✅ مفعل' : '❌ معطل'}`);
   },
@@ -472,6 +399,116 @@ registerCommand({
 
     await sendMessage(ctx.chatId, '🔄 تم إعادة تعيين كل شيء. استخدم /new لبدء جلسة جديدة.', {
       reply_markup: { inline_keyboard: [[{ text: '🆕 مهمة جديدة', callback_data: 'new_agent' }]] },
+    });
+  },
+});
+
+registerCommand({
+  name: 'linux',
+  description: 'معلومات بيئة لينكس المتاحة',
+  handler: async (ctx) => {
+    const { execSync } = await import('child_process');
+    const LINUX_ENV = {
+      PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin',
+      HOME: '/home/z',
+      DEBIAN_FRONTEND: 'noninteractive',
+    };
+
+    let text = `🐧 <b>بيئة لينكس</b>\n\n`;
+
+    // OS info
+    try {
+      const os = execSync('cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d \'"\'', { encoding: 'utf-8', env: LINUX_ENV }).trim();
+      text += `💻 النظام: ${escapeHtml(os)}\n`;
+    } catch { text += `💻 النظام: Linux\n`; }
+
+    // Kernel
+    try {
+      const kernel = execSync('uname -r', { encoding: 'utf-8', env: LINUX_ENV }).trim();
+      text += `🔬 النواة: ${kernel}\n`;
+    } catch {}
+
+    // Arch
+    try {
+      const arch = execSync('uname -m', { encoding: 'utf-8', env: LINUX_ENV }).trim();
+      text += `🏗️ المعالج: ${arch}\n`;
+    } catch {}
+
+    // Memory
+    try {
+      const mem = execSync('free -h --si 2>/dev/null | grep Mem | awk \'{print $2 " / " $3 " مستخدم / " $4 " متاح"}\'', { encoding: 'utf-8', env: LINUX_ENV }).trim();
+      text += `💾 الذاكرة: ${mem}\n`;
+    } catch {}
+
+    // CPU
+    try {
+      const cpus = execSync('nproc', { encoding: 'utf-8', env: LINUX_ENV }).trim();
+      text += `⚡ الأنوية: ${cpus}\n`;
+    } catch {}
+
+    // Disk
+    try {
+      const disk = execSync('df -h / --output=size,used,avail 2>/dev/null | tail -1 | awk \'{print $1 " (مستخدم: " $2 " / متاح: " $3 ")"}\'', { encoding: 'utf-8', env: LINUX_ENV }).trim();
+      text += `💿 القرص: ${disk}\n`;
+    } catch {}
+
+    // Available tools
+    text += `\n🔧 <b>الأدوات المتاحة:</b>\n`;
+    const tools = [
+      { cmd: 'python3', label: '🐍 Python' },
+      { cmd: 'node', label: '🟢 Node.js' },
+      { cmd: 'npm', label: '📦 npm' },
+      { cmd: 'pip3', label: '📦 pip3' },
+      { cmd: 'git', label: '🔀 Git' },
+      { cmd: 'curl', label: '🌐 curl' },
+      { cmd: 'wget', label: '📥 wget' },
+      { cmd: 'gcc', label: '⚙️ GCC' },
+      { cmd: 'g++', label: '⚙️ G++' },
+      { cmd: 'make', label: '🔨 Make' },
+      { cmd: 'docker', label: '🐳 Docker' },
+      { cmd: 'ffmpeg', label: '🎬 FFmpeg' },
+      { cmd: 'convert', label: '🖼️ ImageMagick' },
+      { cmd: 'java', label: '☕ Java' },
+      { cmd: 'go', label: '🔵 Go' },
+      { cmd: 'rustc', label: '🦀 Rust' },
+      { cmd: 'cargo', label: '📦 Cargo' },
+    ];
+
+    const available: string[] = [];
+    const unavailable: string[] = [];
+    for (const tool of tools) {
+      try {
+        execSync(`which ${tool.cmd} 2>/dev/null`, { encoding: 'utf-8', env: LINUX_ENV, timeout: 2000 });
+        available.push(tool.label);
+      } catch {
+        unavailable.push(tool.label);
+      }
+    }
+    text += `  ✅ ${available.join(' | ')}\n`;
+    if (unavailable.length > 0) {
+      text += `  ❌ ${unavailable.join(' | ')}\n`;
+    }
+
+    // Versions
+    text += `\n📊 <b>الإصدارات:</b>\n`;
+    try { const v = execSync('python3 --version 2>&1', { encoding: 'utf-8', env: LINUX_ENV }).trim(); text += `  ${v}\n`; } catch {}
+    try { const v = execSync('node --version 2>&1', { encoding: 'utf-8', env: LINUX_ENV }).trim(); text += `  Node.js ${v}\n`; } catch {}
+    try { const v = execSync('npm --version 2>&1', { encoding: 'utf-8', env: LINUX_ENV }).trim(); text += `  npm ${v}\n`; } catch {}
+    try { const v = execSync('git --version 2>&1', { encoding: 'utf-8', env: LINUX_ENV }).trim(); text += `  ${v}\n`; } catch {}
+    try { const v = execSync('gcc --version 2>&1 | head -1', { encoding: 'utf-8', env: LINUX_ENV }).trim(); text += `  ${v}\n`; } catch {}
+
+    text += `\n💡 <b>تثبيت حزم جديدة:</b>\n`;
+    text += `<code>apt-get install -y ffmpeg</code> — حزم النظام\n`;
+    text += `<code>npm install express</code> — حزم Node.js\n`;
+    text += `<code>pip3 install --user requests</code> — حزم Python\n`;
+
+    await sendMessage(ctx.chatId, text, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔄 تحديث', callback_data: 'linux_info' }],
+          [{ text: '🆕 مهمة جديدة', callback_data: 'new_agent' }],
+        ],
+      },
     });
   },
 });

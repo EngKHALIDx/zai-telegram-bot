@@ -1,13 +1,13 @@
 /**
- * Sandbox & Session Management v19.0
+ * Sandbox & Session Management v18.1
  * Isolated Agent sessions with concurrency limits, idle cleanup, and per-session workspaces
- * Supports multi-provider models
+ * Linux environment initialization for each sandbox
  */
-import { mkdirSync, rmSync, existsSync } from 'fs';
+import { mkdirSync, rmSync, existsSync, writeFileSync, appendFileSync } from 'fs';
 import { join } from 'path';
+import { execSync } from 'child_process';
 import type { ChatMessage } from './zai.js';
 import { getAgentSystemPrompt } from './tools.js';
-import { getModel } from './models.js';
 
 // ─── Configuration ────────────────────────────────────────
 
@@ -28,6 +28,9 @@ export interface Sandbox {
   lastActiveAt: number;
   activeProcessPids: number[];
   summary?: string;
+  linuxReady: boolean;
+  lastCommand?: string;
+  lastCommandAt?: number;
 }
 
 // ─── Storage ──────────────────────────────────────────────
@@ -44,6 +47,92 @@ let cleanupTimer: NodeJS.Timeout | null = null;
 
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
+}
+
+// ─── Linux Environment Setup ──────────────────────────────
+
+function initLinuxEnvironment(workDir: string): void {
+  // Create .bashrc for the workspace with useful aliases and settings
+  const bashrcPath = join(workDir, '.bashrc');
+  if (!existsSync(bashrcPath)) {
+    const bashrc = `# Z.ai Agent Linux Environment
+export PS1='🐧 [zai-agent] \\w\\$ '
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+export TERM=xterm-256color
+export EDITOR=nano
+
+# NPM global
+export NPM_CONFIG_PREFIX="$HOME/.npm-global"
+export PATH="$HOME/.npm-global/bin:$PATH"
+
+# Python user packages
+export PYTHONPATH="$HOME/.local/lib/python3.12/site-packages:$PYTHONPATH"
+export PATH="$HOME/.local/bin:$PATH"
+
+# Useful aliases
+alias ll='ls -la --color=auto'
+alias la='ls -A --color=auto'
+alias l='ls -CF --color=auto'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias cls='clear'
+alias h='history'
+alias py='python3'
+alias node_env='node -e "console.log(process.versions)"'
+
+# Git shortcuts
+alias gs='git status'
+alias gl='git log --oneline -10'
+alias gd='git diff'
+alias ga='git add -A'
+alias gc='git commit -m'
+alias gp='git push'
+`;
+    writeFileSync(bashrcPath, bashrc, 'utf-8');
+  }
+
+  // Create .profile
+  const profilePath = join(workDir, '.profile');
+  if (!existsSync(profilePath)) {
+    const profile = `# Z.ai Agent Profile
+if [ -f "$PWD/.bashrc" ]; then
+    source "$PWD/.bashrc"
+fi
+`;
+    writeFileSync(profilePath, profile, 'utf-8');
+  }
+
+  // Create a README in workspace
+  const readmePath = join(workDir, 'README.md');
+  if (!existsSync(readmePath)) {
+    writeFileSync(readmePath, `# Z.ai Agent Workspace
+
+🐧 بيئة لينكس معزولة - كل الأوامر تنفذ في /bin/bash
+
+## الأدوات المتاحة
+- **Python 3**: \`python3 script.py\`
+- **Node.js**: \`node script.js\`
+- **Bash**: أوامر Shell مباشرة
+- **Git**: \`git init, git add, git commit, git push\`
+- **npm**: \`npm install package\`
+- **pip3**: \`pip3 install --user package\`
+- **apt**: \`sudo apt-get install package\`
+
+## تثبيت حزم جديدة
+\`\`\`bash
+# حزم النظام
+sudo apt-get install -y ffmpeg
+
+# حزم Node.js
+npm install express
+
+# حزم Python
+pip3 install --user requests
+\`\`\`
+`, 'utf-8');
+  }
 }
 
 // ─── Core Functions ───────────────────────────────────────
@@ -73,27 +162,26 @@ export function createSandbox(chatId: number): Sandbox | null {
     mkdirSync(workDir, { recursive: true });
   }
 
+  // Initialize Linux environment
+  initLinuxEnvironment(workDir);
+
   const sandbox: Sandbox = {
     id,
     chatId,
     workDir,
     messages: [{ role: 'system', content: getAgentSystemPrompt() }],
-    model: process.env.DEFAULT_MODEL || 'big-pickle',
+    model: process.env.DEFAULT_MODEL || 'glm-4-flash',
     thinking: false,
     createdAt: Date.now(),
     lastActiveAt: Date.now(),
     activeProcessPids: [],
+    linuxReady: true,
   };
-
-  // Validate model exists, fallback to glm-4-flash if not
-  if (!getModel(sandbox.model)) {
-    sandbox.model = 'glm-4-flash';
-  }
 
   sandboxes.set(id, sandbox);
   chatActiveSandbox.set(chatId, id);
 
-  console.log(`[Sandbox] Created ${id} for chat ${chatId} (workDir: ${workDir})`);
+  console.log(`[Sandbox] Created ${id} for chat ${chatId} (workDir: ${workDir}, linux: ✅)`);
   return sandbox;
 }
 
@@ -116,19 +204,17 @@ export function getOrCreateSandbox(chatId: number): Sandbox {
     const id = generateId();
     const workDir = join(WORKSPACE_ROOT, id);
     if (!existsSync(workDir)) mkdirSync(workDir, { recursive: true });
+    initLinuxEnvironment(workDir);
     const sandbox: Sandbox = {
       id, chatId, workDir,
       messages: [{ role: 'system', content: getAgentSystemPrompt() }],
-      model: process.env.DEFAULT_MODEL || 'big-pickle',
+      model: process.env.DEFAULT_MODEL || 'glm-4-flash',
       thinking: false,
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
       activeProcessPids: [],
+      linuxReady: true,
     };
-    // Validate model exists
-    if (!getModel(sandbox.model)) {
-      sandbox.model = 'glm-4-flash';
-    }
     sandboxes.set(id, sandbox);
     chatActiveSandbox.set(chatId, id);
     return sandbox;
